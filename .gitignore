@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Локальные данные пользователя (в config.json будет API-ключ)
+config.json
+config.json.bak
+config.json.tmp
+
+# Логи и мусор
+*.log
+
+# Сборка PyInstaller
+build/
+dist/
+*.spec
+build_icon.ico
