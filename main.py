@@ -18,6 +18,10 @@ main.py — точка входа приложения «Truniversal» (ШАГИ
 
 Ключевое правило трея: закрытие любого окна НЕ завершает приложение —
 оно остаётся работать в трее (setQuitOnLastWindowClosed(False)).
+
+Этап 1 (стабилизация): защита от повторного запуска (мьютекс Windows),
+предупреждение при неудачной регистрации хоткея и корректное завершение
+приложения с активными фоновыми запросами (см. main()).
 """
 
 from __future__ import annotations
@@ -36,6 +40,7 @@ from config import ConfigManager
 from hotkey_manager import HotkeyManager
 from mini_window import MiniPopupWindow
 from settings_window import SettingsWindow
+from single_instance import SingleInstanceGuard
 from styles import APP_QSS
 from workers import wait_for_workers
 
@@ -106,11 +111,13 @@ def create_app_icon(size: int = 256) -> QIcon:
 class TrayApp:
     """Контроллер трея: связывает конфиг, меню и окна приложения."""
 
-    def __init__(self, app: QApplication) -> None:
+    def __init__(self, app: QApplication,
+                 config_path: Optional[os.PathLike | str] = None) -> None:
         self.app = app
 
         # Конфигурация (config.json создаётся автоматически при первом запуске).
-        self.config = ConfigManager()
+        # config_path нужен тестам, чтобы не трогать реальный файл пользователя.
+        self.config = ConfigManager(config_path)
 
         # Программно сгенерированная иконка — для трея, окон и диалогов.
         self.app_icon = create_app_icon()
@@ -133,6 +140,14 @@ class TrayApp:
         # lambda, чтобы triggered(bool) не передавал checked в captured_text
         action_mini.triggered.connect(lambda: self.show_mini_window())
 
+        # Быстрое включение/выключение хоткея, не открывая настройки.
+        self.hotkey_toggle = self.menu.addAction("Глобальный хоткей")
+        self.hotkey_toggle.setCheckable(True)
+        self.hotkey_toggle.setChecked(
+            bool(self.config.get("hotkey_enabled", True))
+        )
+        self.hotkey_toggle.toggled.connect(self._toggle_hotkey_enabled)
+
         self.menu.addSeparator()
 
         action_quit = self.menu.addAction("Выход")
@@ -142,23 +157,38 @@ class TrayApp:
         self.tray.activated.connect(self._on_tray_activated)
         self.tray.show()
 
-        # Вежливое уведомление при старте: приложение работает в фоне.
-        self.tray.showMessage(
-            APP_NAME,
-            "Приложение запущено и работает в фоне.\n"
-            f"Выделите текст и нажмите «{self.config.get('hotkey')}», "
-            "чтобы перевести его.",
-            QSystemTrayIcon.MessageIcon.Information,
-            5000,
-        )
-
         # --- Глобальный хоткей (библиотека keyboard, свой поток) --------------
         # Захват выделения происходит в фоновом потоке; в GUI текст попадает
         # строго через pyqtSignal (см. hotkey_manager.py).
         self.hotkey_manager = HotkeyManager(self.config)
         self.hotkey_manager.text_captured.connect(self._on_text_captured)
+        self.hotkey_manager.action_captured.connect(self._on_action_captured)
         self.hotkey_manager.capture_failed.connect(self._on_capture_failed)
-        self.hotkey_manager.start()
+        start_status = self.hotkey_manager.start()
+        if start_status == "failed":
+            # Без хоткея приложение почти бесполезно — честно предупреждаем.
+            self.tray.showMessage(
+                APP_NAME,
+                "Не удалось зарегистрировать глобальный хоткей "
+                f"«{self.config.get('hotkey')}».\n"
+                "Возможно, сочетание занято другой программой или не хватает "
+                "прав (окна от администратора требуют запуска от "
+                "администратора). Изменить хоткей можно в настройках.",
+                QSystemTrayIcon.MessageIcon.Warning,
+                8000,
+            )
+        elif start_status == "ok":
+            # Вежливое уведомление при старте: приложение работает в фоне.
+            self.tray.showMessage(
+                APP_NAME,
+                "Приложение запущено и работает в фоне.\n"
+                f"Выделите текст и нажмите «{self.config.get('hotkey')}», "
+                "чтобы перевести его.",
+                QSystemTrayIcon.MessageIcon.Information,
+                5000,
+            )
+        # "disabled" — пользователь сам выключил хоткей; тултип скажет,
+        # как включить обратно. Балун не нужен.
 
         self._refresh_tray_tooltip()
 
@@ -198,13 +228,36 @@ class TrayApp:
     def _on_hotkey_changed(self, hotkey: str) -> None:
         """Хоткей перерегистрирован из настроек — обновляем трей и мини-окно."""
         self._refresh_tray_tooltip()
+        self._sync_hotkey_menu_state()
         if self._mini_window is not None:
             self._mini_window.refresh_from_config()
 
-    def show_mini_window(self, captured_text: Optional[str] = None) -> None:
+    def _toggle_hotkey_enabled(self, enabled: bool) -> None:
+        """Вкл/выкл хоткея прямо из меню трея (сразу сохраняем в config.json)."""
+        enabled = bool(enabled)
+        if not self.config.set("hotkey_enabled", enabled):
+            self.tray.showMessage(
+                APP_NAME,
+                "Не удалось записать config.json — состояние хоткея "
+                "не сохранено после перезапуска.",
+                QSystemTrayIcon.MessageIcon.Warning,
+                5000,
+            )
+        self.hotkey_manager.set_enabled(enabled)
+        self._refresh_tray_tooltip()
+        if self._mini_window is not None:
+            self._mini_window.refresh_from_config()
+
+    def _sync_hotkey_menu_state(self) -> None:
+        """Галочка меню трея отражает конфиг (настройки могли его изменить)."""
+        self.hotkey_toggle.setChecked(bool(self.config.get("hotkey_enabled", True)))
+
+    def show_mini_window(self, captured_text: Optional[str] = None,
+                         action_id: Optional[str] = None) -> None:
         """Открыть мини-окно.
 
         captured_text — текст, пойманный хоткеем: для него создаётся карточка;
+        action_id — конкретное AI-действие, если захват инициирован хоткеем действия;
         окно открывается у курсора (если было закрыто) либо просто дописывает
         карточку в конец открытой ленты. Без captured_text (пункт меню трея)
         окно открывается в правом нижнем углу экрана.
@@ -214,7 +267,7 @@ class TrayApp:
                 self.config, self.app_icon, self.hotkey_manager
             )
         if captured_text is not None:
-            self._mini_window.handle_new_text(captured_text)
+            self._mini_window.handle_new_text(captured_text, action_id=action_id)
         else:
             self._mini_window.show_bottom_right()
 
@@ -223,8 +276,12 @@ class TrayApp:
     # событий GUI-потока (queued connection) — трогать виджеты из потока
     # нельзя, поэтому здесь только «пересадка» на мини-окно.
     def _on_text_captured(self, text: str) -> None:
-        """Готовый выделенный текст → карточка в мини-окне (пока заглушка)."""
+        """Готовый выделенный текст → карточка «Думаю…» в мини-окне."""
         self.show_mini_window(captured_text=text)
+
+    def _on_action_captured(self, text: str, action_id: str) -> None:
+        """Готовый текст по выделенному хоткею действия → мини-окно с этим действием."""
+        self.show_mini_window(captured_text=text, action_id=action_id)
 
     def _on_capture_failed(self, message: str) -> None:
         """Не удалось захватить выделение — мягко сообщаем через трей."""
@@ -233,17 +290,31 @@ class TrayApp:
         )
 
     def _refresh_tray_tooltip(self) -> None:
-        """Тултип иконки трея показывает текущий хоткей (если он есть)."""
+        """Тултип иконки трея: хоткей, либо почему его нет."""
         tip = f"{APP_NAME} — помощник переводчика"
-        hotkey = self.hotkey_manager.hotkey
-        if hotkey:
-            tip += f"\nХоткей мини-окна: {hotkey}"
+        hotkey = (self.config.get("hotkey") or "").strip()
+        if bool(self.config.get("hotkey_enabled", True)):
+            if hotkey:
+                tip += f"\nХоткей мини-окна: {hotkey}"
+            else:
+                tip += "\nХоткей не задан — настройте его в окне настроек"
+        else:
+            tip += "\nХоткей отключён (меню трея → «Глобальный хоткей»)"
         self.tray.setToolTip(tip)
 
     # ----------------------------------------------------------------- выход
     def quit_app(self) -> None:
-        """«Выход»: снимаем хоткей, прячем иконку, закрываем приложение."""
-        self.hotkey_manager.stop()
+        """«Выход»: останавливаем фоновые задачи, снимаем хоткей, завершаем."""
+        # Окно настроек могло запустить фоновые задачи (запись хоткея,
+        # загрузку списка моделей) — останавливаем их ДО выхода: живой
+        # QThread при завершении приложения роняет его (qFatal).
+        if self._settings_window is not None:
+            self._settings_window.shutdown()
+        # Мини-окно могло иметь активные фоновые переводы — отменяем их
+        if self._mini_window is not None:
+            self._mini_window.shutdown()
+        # shutdown снимает хоткей, все хуки keyboard и дожидается освобождения буфера
+        self.hotkey_manager.shutdown()
         self.tray.hide()
         self.app.quit()
 
@@ -277,11 +348,36 @@ def main() -> int:
         )
         return 1
 
+    # Повторный запуск не имеет смысла: две копии конфликтовали бы за
+    # глобальный хоткей и буфер обмена. Проверяем именованным мьютексом
+    # Windows; если копия уже работает — сообщаем и выходим.
+    _instance_guard = SingleInstanceGuard()  # noqa: F841 — мьютекс живёт до конца процесса
+    if not _instance_guard.acquire():
+        QMessageBox.information(
+            None,
+            APP_NAME,
+            "Truniversal уже запущен.\n"
+            "Его иконка находится в области уведомлений (трей), возле часов.",
+        )
+        return 0
+
     _controller = TrayApp(app)  # noqa: F841 — держим ссылку, пока работает app.exec()
     exit_code = app.exec()
-    # Даём фоновым потокам перевода пару секунд корректно завершиться.
-    wait_for_workers()
-    return exit_code
+    # Даём фоновым воркерам несколько секунд корректно завершиться.
+    wait_for_workers(5000)
+
+    # Завершаем процесс немедленно и чисто. Если к этому моменту ещё жив
+    # QThread с долгим запросом (локальная модель может думать десятки
+    # секунд), разборка Python-интерпретатора уничтожила бы его C++-объект
+    # и уронила приложение (qFatal «QThread: Destroyed while thread is
+    # still running»). Все настройки пишутся синхронно — незаписанных
+    # данных нет, поэтому os._exit() безопасен и не даёт аварийных диалогов.
+    try:
+        sys.stdout.flush()
+        sys.stderr.flush()
+    except Exception:
+        pass
+    os._exit(exit_code)
 
 
 if __name__ == "__main__":

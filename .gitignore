@@ -4,16 +4,16 @@ __pycache__/
 .venv/
 venv/
 
-# Локальные данные пользователя (в config.json будет API-ключ)
+# Локальные данные пользователя (генерируются автоматически)
 config.json
 config.json.bak
 config.json.tmp
 
-# Логи и мусор
+# Логи и диагностика
 *.log
+truniversal_diag.log
+diag_report.txt
 
 # Сборка PyInstaller
 build/
 dist/
-*.spec
-build_icon.ico

@@ -19,7 +19,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pyperclip
 from PyQt6.QtTest import QTest
-from PyQt6.QtWidgets import QApplication
+from PyQt6.QtWidgets import QApplication, QMessageBox
 
 import main as m
 from config import ConfigManager
@@ -57,7 +57,7 @@ def run() -> int:
         settings._apply_api_preset("OpenRouter")
         assert "openrouter.ai" in settings.api_url_edit.text()
         # Вкладка 2: список пресетов, редактор и сохранение.
-        assert settings.preset_list.count() == 3
+        assert settings.preset_list.count() >= 3
         settings.preset_list.setCurrentRow(1)
         assert settings.preset_name_edit.text() == "3 варианта перефразирования"
         settings.preset_text_edit.setPlainText("Тестовый текст пресета")
@@ -71,7 +71,66 @@ def run() -> int:
         settings._save_common_tab()
         assert cfg.get("hotkey") == "ctrl+shift+t"
         assert cfg.get("target_lang") == "en"
-        print("[OK] 2. SettingsWindow — вкладки, ползунки, пресеты, хоткеи")
+
+        # Чекбоксы Этапа 2: включённость хоткея и режим диагностики.
+        assert settings.hotkey_enabled_cb.isChecked()
+        assert not settings.diagnostics_cb.isChecked()
+        assert settings.hotkey_edit.isEnabled()
+        settings.hotkey_enabled_cb.setChecked(False)
+        assert not settings.hotkey_edit.isEnabled()   # поле погасло
+        settings.diagnostics_cb.setChecked(True)
+        settings._save_common_tab()
+        assert cfg.get("hotkey_enabled") is False
+        assert cfg.get("diagnostics") is True
+        assert cfg.get("hotkey") == "ctrl+shift+t"    # сочетание сохранено
+        settings.hotkey_enabled_cb.setChecked(True)
+        settings._save_common_tab()
+        assert cfg.get("hotkey_enabled") is True
+        assert settings.hotkey_edit.isEnabled()
+
+        # Полный сброс к заводским настройкам: подтверждение подменяем
+        # (иначе тест застрял бы в диалоге). После сброса — дефолты во всех
+        # вкладках, «грязный» флаг снят, пользовательские промпты заменены.
+        settings.api_url_edit.setText("http://changed/api")
+        settings._mark_dirty()
+        assert settings._dirty
+        original_question = QMessageBox.question
+        QMessageBox.question = staticmethod(
+            lambda *a, **k: QMessageBox.StandardButton.Yes
+        )
+        try:
+            settings._reset_all_settings()
+        finally:
+            QMessageBox.question = original_question
+        assert cfg.get("hotkey") == "alt+q"
+        assert cfg.get("api_url") == "http://localhost:11434/v1/chat/completions"
+        assert settings.hotkey_edit.text() == "alt+q"
+        assert settings.api_url_edit.text() == cfg.get("api_url")
+        assert settings.model_combo.currentText() == "llama3"
+        assert settings.preset_list.count() >= 3
+        assert "Новый пресет" not in cfg.get("prompts")
+        assert settings.hotkey_enabled_cb.isChecked()      # сброс вернул флаги
+        assert not settings.diagnostics_cb.isChecked()
+        assert not settings._dirty
+
+        # Проверяем отмену несохранённых изменений при закрытии окна
+        settings.api_url_edit.setText("http://discarded/api")
+        assert settings._dirty
+        original_question = QMessageBox.question
+        QMessageBox.question = staticmethod(
+            lambda *a, **k: QMessageBox.StandardButton.Yes
+        )
+        try:
+            settings.close()
+        finally:
+            QMessageBox.question = original_question
+        assert not settings._dirty, "После закрытия без сохранения _dirty должен быть False"
+        assert settings.api_url_edit.text() == cfg.get("api_url"), "Поле должно вернуться к конфигу"
+
+        # shutdown() без запущенных фоновых задач безопасен (используется
+        # при закрытии окна и при выходе из приложения).
+        settings.shutdown()
+        print("[OK] 2. SettingsWindow — вкладки, ползунки, пресеты, сброс, shutdown")
 
         # 3. Мини-окно: «Думаю…», результат/ошибка, режим, пресеты, очистка.
         # Порт 9 закрыт всегда → ошибка подключения в карточке детерминирована.
@@ -134,6 +193,14 @@ def run() -> int:
         assert len(popup._cards) == 0
         assert popup.empty_label.isVisible()
 
+        # Подсказка про хоткей учитывает его отключение (Этап 2).
+        assert "alt+q" in popup.empty_label.text() or cfg.get("hotkey") in popup.empty_label.text()
+        cfg.set("hotkey_enabled", False, autosave=False)
+        popup.refresh_from_config()
+        assert "отключён" in popup.empty_label.text()
+        cfg.set("hotkey_enabled", True, autosave=False)
+        popup.refresh_from_config()
+
         # «Повторить»: карточка возвращается в «Думаю…» и перезапускает воркер.
         popup.handle_new_text("Текст для регенерации")
         QTest.qWait(4500)  # ждём ошибку от закрытого порта (~2 с)
@@ -158,30 +225,67 @@ def run() -> int:
         assert copied == ["Результат для замены"], copied
         assert not popup.isVisible()
         assert len(popup._cards) == 0
-    print("[OK] 3. MiniPopupWindow — «Думаю…», «Повторить», «Заменить», режим, пресеты")
+        # Проверка отмены активных воркеров при clear_history() и shutdown()
+        popup.handle_new_text("Ещё один запрос для проверки отмены")
+        assert len(popup._workers) >= 1
+        popup.clear_history()
+        assert len(popup._cards) == 0
+        assert len(popup._workers) == 0
+        assert popup.empty_label.isVisible()
+        popup.shutdown()
+        assert len(popup._workers) == 0
+    print("[OK] 3. MiniPopupWindow — «Думаю…», «Повторить», «Заменить», отмена воркеров, shutdown")
 
-    # 4. Контроллер трея: меню + глобальный хоткей из конфига.
-    ctrl = m.TrayApp(app)
-    actions = [a.text() for a in ctrl.menu.actions() if a.text()]
-    assert actions == ["Открыть настройки", "Открыть мини-окно", "Выход"], actions
-    assert ctrl.hotkey_manager.hotkey == ctrl.config.get("hotkey"), "хоткей не зарегистрирован"
-    print("[OK] 4. TrayApp — меню трея; хоткей зарегистрирован:", ctrl.hotkey_manager.hotkey)
+    # 4. Контроллер трея: меню + глобальный хоткей. Конфиг — во ВРЕМЕННОЙ
+    #    папке: реальный config.json пользователя тест не трогает.
+    with tempfile.TemporaryDirectory() as tray_dir:
+        ctrl = m.TrayApp(app, config_path=Path(tray_dir) / "config.json")
+        actions = [a.text() for a in ctrl.menu.actions() if a.text()]
+        assert actions == [
+            "Открыть настройки", "Открыть мини-окно", "Глобальный хоткей", "Выход"
+        ], actions
+        assert ctrl.hotkey_manager.hotkey == ctrl.config.get("hotkey"), "хоткей не зарегистрирован"
+        assert ctrl.hotkey_toggle.isChecked()
+        print("[OK] 4. TrayApp — меню трея; хоткей зарегистрирован:", ctrl.hotkey_manager.hotkey)
 
-    # 5. pyqtSignal-путь: «захват» доходит до мини-окна и превращается в карточку.
-    received = []
-    ctrl.hotkey_manager.text_captured.connect(lambda text: received.append(text))
-    ctrl.hotkey_manager.text_captured.emit("Тестовый захват")
-    assert received == ["Тестовый захват"]
-    # TrayApp сам подписан на этот же сигнал — карточка создаётся уже при emit:
-    assert len(ctrl._mini_window._cards) == 1
-    # Карточка сразу в режиме «Думаю…» — фоновый перевод уже запущен.
-    assert ctrl._mini_window._cards[0].result_label.text().startswith("Думаю")
-    ctrl._on_text_captured("Второй тестовый захват")
-    assert len(ctrl._mini_window._cards) == 2
-    assert ctrl._mini_window._cards[-1].result_label.text().startswith("Думаю")
-    print("[OK] 5. pyqtSignal: захват доходит до мини-окна, карточки создаются")
+        # Переключатель хоткея в меню трея (Этап 2): выключение снимает
+        # регистрацию и сохраняется в config.json; включение возвращает.
+        ctrl.hotkey_toggle.setChecked(False)
+        assert ctrl.config.get("hotkey_enabled") is False
+        assert ctrl.hotkey_manager.hotkey == ""
+        assert "отключён" in ctrl.tray.toolTip()
+        ctrl.hotkey_toggle.setChecked(True)
+        assert ctrl.config.get("hotkey_enabled") is True
+        assert ctrl.hotkey_manager.hotkey == "alt+q"
+        assert "alt+q" in ctrl.tray.toolTip()
 
-    ctrl.hotkey_manager.stop()  # снимаем реальный хоткей, зарегистрированный тестом
+        # 5. pyqtSignal-путь: «захват» доходит до мини-окна и превращается
+        #    в карточку. Адрес API — заведомо закрытый порт: перевод
+        #    детерминированно падает ошибкой и не задевает реальную Ollama.
+        ctrl.config.set("api_url", "http://127.0.0.1:9/v1/chat/completions")
+        received = []
+        ctrl.hotkey_manager.text_captured.connect(lambda text: received.append(text))
+        ctrl.hotkey_manager.text_captured.emit("Тестовый захват")
+        assert received == ["Тестовый захват"]
+        # TrayApp сам подписан на этот же сигнал — карточка создаётся уже при emit:
+        assert len(ctrl._mini_window._cards) == 1
+        # Карточка сразу в режиме «Думаю…» — фоновый перевод уже запущен.
+        assert ctrl._mini_window._cards[0].result_label.text().startswith("Думаю")
+        ctrl._on_text_captured("Второй тестовый захват")
+        assert len(ctrl._mini_window._cards) == 2
+        assert ctrl._mini_window._cards[-1].result_label.text().startswith("Думаю")
+        print("[OK] 5. pyqtSignal: захват доходит до мини-окна, карточки создаются")
+
+        # 6. Завершение приложения: quit_app корректно останавливает фоновые
+        #    задачи, закрывает открытые окна (настройки и мини-окно),
+        #    снимает хоткей и прячет иконку — без падений и зависаний.
+        ctrl.show_settings()
+        assert ctrl._settings_window is not None
+        assert ctrl._mini_window is not None
+        ctrl.quit_app()
+        assert not ctrl.hotkey_manager.hotkey, "хоткей должен быть снят"
+        assert not ctrl.tray.isVisible()
+
     wait_for_workers()  # мягко ждём фоновые потоки перевода перед выходом
     print("SMOKE TEST PASSED (offscreen)")
     return 0

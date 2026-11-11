@@ -50,6 +50,28 @@ def force_foreground(hwnd: int) -> bool:
     return user32.GetForegroundWindow() == hwnd
 
 
+class _RECT(ctypes.Structure):
+    _fields_ = [("left", ctypes.c_long), ("top", ctypes.c_long),
+                ("right", ctypes.c_long), ("bottom", ctypes.c_long)]
+
+
+def click_window_center(hwnd: int) -> bool:
+    """Клик в центр окна через mouse_event — реальный ввод, снимающий
+    foreground-lock Windows. Нужен для АВТОНОМНЫХ прогонов теста (без
+    пользователя, который кликнул бы окно сам)."""
+    rect = _RECT()
+    if not user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+        return False
+    x = (rect.left + rect.right) // 2
+    y = (rect.top + rect.bottom) // 2
+    user32.SetCursorPos(x, y)
+    QTest.qWait(60)
+    LEFTDOWN, LEFTUP = 0x0002, 0x0004
+    user32.mouse_event(LEFTDOWN, 0, 0, 0, 0)
+    user32.mouse_event(LEFTUP, 0, 0, 0, 0)
+    return True
+
+
 KEY_CODES = {
     "ctrl": (0x11, 0x1D),
     "alt": (0x12, 0x38),
@@ -116,13 +138,21 @@ def main() -> int:
     if not focused:
         win.setWindowTitle(">>> КЛИКНИТЕ по этому окну — e2e тест <<<")
         print("Окну нужен клик мышью; ждём до 15 секунд...")
-        for _ in range(300):
+        auto_clicked = False
+        for i in range(300):
             QTest.qWait(50)
             if user32.GetForegroundWindow() == hwnd and edit.hasFocus():
                 focused = True
                 break
             edit.setFocus(Qt.FocusReason.OtherFocusReason)
             edit.selectAll()
+            if i in (20, 120, 220):
+                # Автономный прогон: пробуем кликнуть в окно сами —
+                # инъекция мыши считается реальным вводом и снимает
+                # foreground-lock Windows.
+                ok_click = click_window_center(hwnd)
+                print("Автоклик в центр окна:",
+                      "выполнен" if ok_click else "не удался")
     if not focused:
         print("FOCUS-FAIL: инъекции НЕ выполнялись.")
         win.close()
@@ -140,7 +170,7 @@ def main() -> int:
     failures = []
     manager.text_captured.connect(lambda text: received.append(text))
     manager.capture_failed.connect(lambda message: failures.append(message))
-    if not manager.start():
+    if manager.start() != "ok":
         print("Не удалось зарегистрировать производственный хоткей — тест невозможен.")
         win.close()
         return 1
