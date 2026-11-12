@@ -20,6 +20,8 @@ TranslationWorker(QThread):
 
 from __future__ import annotations
 
+import sys
+import threading
 import time
 from typing import Any, Optional, Set
 
@@ -88,6 +90,90 @@ class _TranslationError(Exception):
     """Ошибка с человеческим описанием — попадёт прямо в карточку."""
 
 
+def humanize_error(exc_or_msg: Any, context: Optional[Dict[str, Any] | str] = None) -> Tuple[str, str]:
+    """Преобразует технические исключения/сообщения в человекочитаемое объяснение
+    и отдельный блок технических подробностей для диагностики (Этап 9.6)."""
+    if isinstance(context, str):
+        context = {"url": context}
+    else:
+        context = context or {}
+    url = context.get("url", "")
+    model = context.get("model", "")
+    raw_str = str(exc_or_msg)
+
+    # 1. Ошибки подключения (Ollama / Local host)
+    if "11434" in raw_str or "localhost:11434" in url or "127.0.0.1:11434" in url:
+        if any(term in raw_str.lower() for term in ("refused", "10061", "failed to establish", "не удалось подключиться")):
+            return (
+                "Локальный сервер Ollama недоступен. Убедитесь, что приложение Ollama запущено (выполните команду «ollama serve» в терминале).",
+                f"Endpoint: {url}\nError: {raw_str}"
+            )
+
+    # 2. Ошибки сети / DNS
+    if any(term in raw_str.lower() for term in ("nameresolutionerror", "getaddrinfo failed", "failed to establish a new connection")):
+        return (
+            "Не удалось подключиться к серверу. Проверьте интернет-соединение или адрес API в настройках профиля.",
+            f"Endpoint: {url}\nError: {raw_str}"
+        )
+
+    # 3. Таймауты
+    if "timed out" in raw_str.lower() or "timeout" in raw_str.lower() or "время ожидания" in raw_str.lower():
+        return (
+            "Превышено время ожидания ответа от модели. Попробуйте повторить запрос или увеличьте таймаут в настройках.",
+            f"Endpoint: {url}\nTimeout details: {raw_str}"
+        )
+
+    # 4. HTTP 401 Unauthorized / Invalid Key
+    if "401" in raw_str or "unauthorized" in raw_str.lower() or "invalid api key" in raw_str.lower():
+        return (
+            "Неверный или отсутствующий API-ключ. Проверьте ключ в настройках профиля (вкладка «Модели и Параметры ИИ»).",
+            f"HTTP 401 Unauthorized\nModel: {model}\nEndpoint: {url}\nDetails: {raw_str}"
+        )
+
+    # 5. HTTP 403 Forbidden
+    if "403" in raw_str or "forbidden" in raw_str.lower():
+        return (
+            "Доступ к модели отклонён сервером (HTTP 403). Проверьте права API-ключа или региональные ограничения.",
+            f"HTTP 403 Forbidden\nModel: {model}\nEndpoint: {url}\nDetails: {raw_str}"
+        )
+
+    # 6. HTTP 404 Model Not Found
+    if "404" in raw_str or "not found" in raw_str.lower():
+        return (
+            f"Модель «{model or 'не указана'}» не найдена на сервере (код 404). Проверьте точное имя модели в настройках профиля.",
+            f"HTTP 404 Not Found\nModel: {model}\nEndpoint: {url}\nDetails: {raw_str}"
+        )
+
+    # 7. HTTP 429 Rate Limit
+    if "429" in raw_str or any(term in raw_str.lower() for term in ("rate limit", "quota", "too many requests")):
+        return (
+            "Превышен лимит запросов к сервису ИИ (код 429). Подождите несколько секунд или проверьте баланс токенов.",
+            f"HTTP 429 Rate Limit / Quota Exceeded\nEndpoint: {url}\nDetails: {raw_str}"
+        )
+
+    # 8. HTTP 500 / 502 / 503 / 504 Server Error
+    if any(code in raw_str for code in ("500", "502", "503", "504")) or "server error" in raw_str.lower():
+        return (
+            "Сервер сервиса ИИ временно испытывает сбои или перегружен. Повторите попытку через минуту.",
+            f"HTTP Server Error\nEndpoint: {url}\nDetails: {raw_str}"
+        )
+
+    # 9. Пустой ответ
+    if "пустой ответ" in raw_str.lower() or "empty response" in raw_str.lower():
+        return (
+            "Модель вернула пустой ответ. Попробуйте повторить запрос с другим действием или скорректируйте исходный текст.",
+            f"Empty Response from model: {model}\nEndpoint: {url}"
+        )
+
+    clean_msg = raw_str
+    if clean_msg.startswith("Ошибка: "):
+        clean_msg = clean_msg[8:]
+    return (
+        clean_msg,
+        f"Endpoint: {url}\nModel: {model}\nDiagnostics: {raw_str}"
+    )
+
+
 def _detect_ru_en(text: str) -> Optional[str]:
     """Эвристика языка: «ru», если кириллицы не меньше латиницы, иначе «en» (обратная совместимость)."""
     return detect_ru_en_legacy(text)
@@ -151,6 +237,12 @@ class TranslationWorker(QThread):
     #: Понятная ошибка — показывается прямо в карточке.
     failed = pyqtSignal(str)
 
+    #: Детализированная ошибка: (понятное сообщение, технический стек/параметры)
+    failed_with_details = pyqtSignal(str, str)
+
+    #: Текущий статус операции: "sending", "generating", "ready", "error", "cancelled" (Этап 9.3)
+    status_changed = pyqtSignal(str)
+
     #: Разрешённое направление перевода: (исходный код, целевой код, бейдж "EN → RU")
     direction_resolved = pyqtSignal(str, str, str)
 
@@ -181,6 +273,7 @@ class TranslationWorker(QThread):
         self.action_id = action_id
         self.custom_prompt = custom_prompt
         self.resolved_direction: Optional[DirectionResolution] = None
+        self.operation_meta: Dict[str, Any] = {}
         self._session: Optional[Any] = None
         _live_threads.add(self)
         # Встроенный сигнал finished: поток завершился — убираем из реестра.
@@ -236,6 +329,7 @@ class TranslationWorker(QThread):
         self.direction_resolved.emit(direction.source_lang, direction.target_lang, direction.display_badge)
 
         try:
+            self.status_changed.emit("sending")
             mode = (self.config.get("mode") or "ai").strip().lower()
             if mode == "ai":
                 result = self._translate_ai(direction)
@@ -243,14 +337,33 @@ class TranslationWorker(QThread):
                 result = self._translate_standard(direction)
         except _TranslationError as exc:
             if not self.isInterruptionRequested():
-                self.failed.emit(str(exc))
+                friendly = str(exc)
+                details = f"Endpoint: {self.operation_meta.get('url', '')}\nModel: {self.operation_meta.get('model', '')}\n{str(exc)}"
+                self.status_changed.emit("error")
+                self.failed.emit(friendly)
+                self.failed_with_details.emit(friendly, details)
             return
         except Exception as exc:  # совсем неожиданное — тоже не молчим
             if not self.isInterruptionRequested():
-                self.failed.emit(f"Неожиданная ошибка перевода: {exc}")
+                friendly, details = humanize_error(exc, self.operation_meta)
+                self.status_changed.emit("error")
+                self.failed.emit(f"Неожиданная ошибка: {friendly}")
+                self.failed_with_details.emit(f"Неожиданная ошибка: {friendly}", details)
             return
         if not self.isInterruptionRequested():
+            self.status_changed.emit("ready")
+            # Добавляем выполненный перевод в память контекста проекта (Этап 8.5)
+            try:
+                from project_manager import get_project_manager
+                pm = get_project_manager()
+                pid = self.operation_meta.get("project_id") or pm.get_active_project_id()
+                if pid:
+                    pm.add_memory_chunk(pid, self.source_text, result)
+            except Exception:
+                pass
             self.finished_ok.emit(result)
+        else:
+            self.status_changed.emit("cancelled")
 
     # ---------------------------------------------------- режим «Обычный»
     def _translate_standard(self, direction: Optional[DirectionResolution] = None) -> str:
@@ -269,6 +382,33 @@ class TranslationWorker(QThread):
             )
         target = direction.target_lang
         engine = (self.config.get("standard_engine") or "google").strip().lower()
+
+        # Проверяем активный проект (Этап 8)
+        proj_name = ""
+        proj_id = ""
+        try:
+            from project_manager import get_project_manager
+            pm = get_project_manager()
+            act_p = pm.get_active_project()
+            if act_p:
+                proj_name = act_p.get("name", "")
+                proj_id = act_p.get("id", "")
+        except Exception:
+            pass
+
+        self.operation_meta = {
+            "source_text": self.source_text,
+            "action_id": "action_standard",
+            "action_name": "Обычный перевод",
+            "prompt_text": "",
+            "provider_type": "standard",
+            "model_name": engine,
+            "source_lang": direction.source_lang,
+            "target_lang": direction.target_lang,
+            "direction": direction.display_badge,
+            "project_context": proj_name or str(self.config.get("project_context", "")),
+            "project_id": proj_id,
+        }
         if engine == "deepl":
             return self._translate_deepl(direction.source_lang, target)
 
@@ -390,11 +530,23 @@ class TranslationWorker(QThread):
         if action_data:
             self.action_resolved.emit(action_data.get("id", ""), action_name)
 
-        # Поддержка AI-профилей (Этап 3, 5) с возможностью выбора профиля в действии
+        # Поддержка AI-профилей (Этап 3, 5) с возможностью выбора профиля в действии и проекте
         profile: dict[str, Any] = {}
         override_pid = str(action_data.get("profile_id") or "").strip() if action_data else ""
         if override_pid and hasattr(self.config, "get_profile"):
             profile = self.config.get_profile(override_pid) or {}
+
+        # Проверяем активный проект (Этап 8)
+        from project_manager import get_project_manager
+        pm = get_project_manager()
+        active_project = pm.get_active_project()
+
+        # Если в действии профиль не переопределен, а в проекте задан свой AI-профиль — используем его
+        if not profile and active_project and active_project.get("ai_profile_id") and hasattr(self.config, "get_profile"):
+            p_prof = self.config.get_profile(active_project["ai_profile_id"])
+            if p_prof:
+                profile = p_prof
+
         if not profile and hasattr(self.config, "get_active_profile"):
             try:
                 profile = self.config.get_active_profile() or {}
@@ -429,17 +581,49 @@ class TranslationWorker(QThread):
             prompt_template = "Ты — профессиональный переводчик. Переведи на {target_lang}."
 
         from config import format_prompt_template
-        project_context = self.config.get("project_context", "") if hasattr(self.config, "get") else ""
-        glossary = self.config.get("glossary", "") if hasattr(self.config, "get") else ""
+
+        # Сборка проектного контекста (глоссарий, правила, лор, память, разовые заметки)
+        proj_ctx_data = pm.build_prompt_context(self.source_text, active_project.get("id") if active_project else None)
+        project_context_str = proj_ctx_data.get("project_context_block", "")
+        glossary_str = proj_ctx_data.get("glossary_block", "")
+
+        legacy_ctx = self.config.get("project_context", "") if hasattr(self.config, "get") else ""
+        if legacy_ctx and legacy_ctx not in project_context_str:
+            project_context_str = f"{project_context_str}\n\n{legacy_ctx}".strip()
+
+        legacy_glo = self.config.get("glossary", "") if hasattr(self.config, "get") else ""
+        if legacy_glo and legacy_glo not in glossary_str:
+            glossary_str = f"{glossary_str}\n\n{legacy_glo}".strip()
 
         system_prompt = format_prompt_template(
             template=prompt_template,
             text=self.source_text,
             source_lang=direction.source_lang,
             target_lang=direction.target_lang,
-            project_context=project_context,
-            glossary=glossary,
+            project_context=project_context_str,
+            glossary=glossary_str,
         )
+
+        # Если в шаблоне не было явных тегов {glossary} или {project_context},
+        # обязательно дописываем их в конец системной инструкции, чтобы модель соблюдала правила!
+        if glossary_str and "{glossary}" not in prompt_template:
+            system_prompt = f"{system_prompt}\n\n{glossary_str}"
+        if project_context_str and "{project_context}" not in prompt_template:
+            system_prompt = f"{system_prompt}\n\n{project_context_str}"
+
+        self.operation_meta = {
+            "source_text": self.source_text,
+            "action_id": action_data.get("id", "") if action_data else "custom_prompt",
+            "action_name": action_name,
+            "prompt_text": prompt_template,
+            "provider_type": provider_type,
+            "model_name": model,
+            "source_lang": direction.source_lang,
+            "target_lang": direction.target_lang,
+            "direction": direction.display_badge,
+            "project_context": active_project.get("name", "") if active_project else str(legacy_ctx),
+            "project_id": active_project.get("id", "") if active_project else "",
+        }
 
         temperature = float(profile.get("temperature", self.config.get("temperature", 0.3)))
         top_p = float(profile.get("top_p", self.config.get("top_p", 0.9)))
@@ -483,6 +667,7 @@ class TranslationWorker(QThread):
                 session.proxies.update(proxies)
             self._session = session
             try:
+                self.status_changed.emit("generating")
                 if is_mocked:
                     response = requests.post(
                         api_url, json=payload, headers=headers, timeout=(timeout_connect, timeout_request)
@@ -972,11 +1157,38 @@ class ConnectionCheckWorker(QThread):
                 self._session = None
 
 
+def _release_modifiers_win32() -> None:
+    """Гарантированно отпускает клавиши-модификаторы на уровне Win32."""
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            user32 = ctypes.windll.user32
+            KEYEVENTF_KEYUP = 0x0002
+            KEYEVENTF_EXTENDEDKEY = 0x0001
+            for vk, scan, ext in (
+                (0x12, 0x38, False),  # VK_MENU (Alt)
+                (0xA4, 0x38, False),  # VK_LMENU
+                (0xA5, 0x38, True),   # VK_RMENU
+                (0x11, 0x1D, False),  # VK_CONTROL
+                (0xA2, 0x1D, False),  # VK_LCONTROL
+                (0xA3, 0x1D, True),   # VK_RCONTROL
+                (0x10, 0x2A, False),  # VK_SHIFT
+                (0xA0, 0x2A, False),  # VK_LSHIFT
+                (0xA1, 0x36, False),  # VK_RSHIFT
+                (0x5B, 0x5B, True),   # VK_LWIN
+                (0x5C, 0x5C, True),   # VK_RWIN
+            ):
+                flags = KEYEVENTF_KEYUP | (KEYEVENTF_EXTENDEDKEY if ext else 0)
+                user32.keybd_event(vk, scan, flags, 0)
+        except Exception:
+            pass
+
+
 class HotkeyRecorder(QThread):
     """Ждёт нажатие сочетания клавиш для кнопки «Записать нажатие» (в фоне).
 
-    keyboard.read_hotkey() — блокирующий вызов, поэтому он обязан жить в
-    отдельном потоке. cancel() прерывает ожидание (кнопка-тоггл «Отмена»).
+    Использует безопасный неблокирующий перехват без подавления системных событий
+    (suppress=False) и гарантирует снятие зажатых клавиш модификаторов.
     """
 
     done = pyqtSignal(str)  # записанное сочетание или "" при отмене
@@ -985,25 +1197,91 @@ class HotkeyRecorder(QThread):
         super().__init__(parent)
         _live_threads.add(self)
         self.finished.connect(lambda: _live_threads.discard(self))
+        self._is_cancelled = False
+        self._hook = None
+
+    def cancel(self) -> None:
+        """Прерывает ожидание нажатия — безопасно снимает хук и отпускает клавиши."""
+        self._is_cancelled = True
+        if self._hook is not None and keyboard is not None:
+            try:
+                keyboard.unhook(self._hook)
+            except Exception:
+                pass
+            self._hook = None
+        _release_modifiers_win32()
 
     def run(self) -> None:
         if keyboard is None:
             self.done.emit("")
             return
-        try:
-            recorded = keyboard.read_hotkey(suppress=True)
-        except Exception:
-            self.done.emit("")
-            return
-        self.done.emit(recorded or "")
 
-    def cancel(self) -> None:
-        """Прерывает ожидание нажатия — read_hotkey вернётся с пустым значением."""
-        if keyboard is not None:
-            try:
-                keyboard.stop_reading()
-            except Exception:
-                pass
+        _release_modifiers_win32()
+        self._is_cancelled = False
+
+        recorded_hotkey = ""
+        done_flag = threading.Event()
+        pressed_keys = set()
+
+        def on_key_event(event):
+            if self._is_cancelled:
+                done_flag.set()
+                return
+
+            name = (event.name or "").strip().lower()
+            if not name:
+                return
+
+            if event.event_type == keyboard.KEY_DOWN:
+                pressed_keys.add(name)
+            elif event.event_type == keyboard.KEY_UP:
+                if pressed_keys:
+                    mods = []
+                    others = []
+                    for k in pressed_keys:
+                        kn = k.lower()
+                        if "ctrl" in kn:
+                            if "ctrl" not in mods:
+                                mods.append("ctrl")
+                        elif "alt" in kn:
+                            if "alt" not in mods:
+                                mods.append("alt")
+                        elif "shift" in kn:
+                            if "shift" not in mods:
+                                mods.append("shift")
+                        elif "windows" in kn or "win" in kn:
+                            if "windows" not in mods:
+                                mods.append("windows")
+                        else:
+                            if kn not in others:
+                                others.append(kn)
+                    final_keys = mods + others
+                    if final_keys:
+                        nonlocal recorded_hotkey
+                        recorded_hotkey = "+".join(final_keys)
+                        done_flag.set()
+
+        try:
+            self._hook = keyboard.hook(on_key_event, suppress=False)
+            for _ in range(300):  # До 30 секунд
+                if self._is_cancelled or done_flag.is_set():
+                    break
+                time.sleep(0.05)
+        except Exception:
+            pass
+        finally:
+            if self._hook is not None and keyboard is not None:
+                try:
+                    keyboard.unhook(self._hook)
+                except Exception:
+                    pass
+                self._hook = None
+            _release_modifiers_win32()
+
+        if self._is_cancelled:
+            self.done.emit("")
+        else:
+            self.done.emit(recorded_hotkey)
 
 
 def wait_for_workers(timeout_ms: int = 3000) -> None:

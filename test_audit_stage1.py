@@ -322,7 +322,7 @@ def run_all_audit_checks() -> int:
 
         # Сигнал set_error
         card.set_error("Тестовая ошибка")
-        assert card.result_label.text().startswith("⚠")
+        assert "Тестовая ошибка" in card.result_label.text()
         assert card.copy_button.isVisible() is False
         assert card.replace_button.isVisible() is False
         assert card.regenerate_button.isEnabled() is True

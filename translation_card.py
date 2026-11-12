@@ -3,18 +3,20 @@ translation_card.py — карточка с результатом в ленте
 
 Карточка (QFrame) содержит:
   • исходный текст (с возможностью редактирования перед повтором);
-  • бейджи применённого действия и ручной правки, кнопку удаления «✕»;
+  • бейджи применённого действия и ручной правки, кнопку удаления «x»;
   • результат перевода/рерайта (с поддержкой ручного редактирования);
   • панель нескольких вариантов (Вариант 1, 2, 3 с индивидуальными кнопками действий);
   • панель пословного сравнения оригинала и результата (Diff);
   • панель изменения промпта на лету;
-  • компактную строку действий: направление (RU → EN, ⇄), «🔍 Сравнить»,
+  • компактную строку действий: направление (RU → EN, ⇄), «Сравнить»,
     «Повторить», «Заменить в тексте», «Скопировать», меню «⋯» (дополнительно),
-    а также кнопку «✕ Отмена» во время выполнения запроса.
+    а также кнопку «Отмена» во время выполнения запроса.
 """
 
 from __future__ import annotations
 
+import os
+import time
 from typing import List, Optional, Tuple
 
 import pyperclip
@@ -35,7 +37,7 @@ LOADING_FRAMES = ("Думаю", "Думаю.", "Думаю..", "Думаю...")
 
 
 class TranslationCard(QFrame):
-    """Многофункциональная карточка результата в мини-окне (Этап 6)."""
+    """Многофункциональная карточка результата в мини-окне (Этапы 2–6, 9)."""
 
     #: Запрос на повторный запуск перевода
     regenerate_requested = pyqtSignal()
@@ -52,6 +54,9 @@ class TranslationCard(QFrame):
     #: Запрос на повтор с изменённым промптом (Этап 6.4)
     prompt_regenerate_requested = pyqtSignal(str)
 
+    #: Результат был отредактирован вручную пользователем (Этап 6, 7)
+    result_edited = pyqtSignal(str)
+
     #: Для совместимости со старыми вызовами
     action_menu_requested = pyqtSignal()
 
@@ -62,10 +67,15 @@ class TranslationCard(QFrame):
         self.source_text: str = source_text or ""
         self.result_text: Optional[str] = result_text
         self.edited_text: Optional[str] = None
+        self.history_id: Optional[int] = None
         self.action_id: str = ""
         self.action_name: str = ""
         self._variants: List[Tuple[str, str]] = []
         self._comparison_mode: bool = False
+        self.technical_details: str = ""
+
+        self._start_time: float = 0.0
+        self._current_status: str = "idle"
 
         self.action_btn = None  # для обратной совместимости
 
@@ -82,47 +92,76 @@ class TranslationCard(QFrame):
         self._copy_timer.setInterval(1000)
         self._copy_timer.timeout.connect(self._restore_copy_button)
 
+        # Таймер прошедшего времени запроса (Этап 9.3)
+        self._status_timer = QTimer(self)
+        self._status_timer.setInterval(200)
+        self._status_timer.timeout.connect(self._update_status_elapsed)
+
         # Главный layout карточки
         self._layout = QVBoxLayout(self)
         self._layout.setContentsMargins(14, 12, 14, 12)
         self._layout.setSpacing(8)
 
-        # ---------------- 1. Верхняя строка (исходник, бейджи, удалить) -------
+        # ---------------- 1. Контейнер исходного текста (Этап 9.2) ------------
+        self.source_container = QFrame()
+        self.source_container.setObjectName("SourceContainer")
+        src_cont_layout = QVBoxLayout(self.source_container)
+        src_cont_layout.setContentsMargins(10, 8, 10, 8)
+        src_cont_layout.setSpacing(6)
+
+        # Верхняя строка контейнера (Оригинал, бейджи, кнопки ред. и удалить)
         top_row = QHBoxLayout()
         top_row.setContentsMargins(0, 0, 0, 0)
         top_row.setSpacing(6)
 
-        self.source_label = QLabel(self._preview(self.source_text))
-        self.source_label.setObjectName("CardSourceLabel")
-        self.source_label.setWordWrap(True)
-        top_row.addWidget(self.source_label, stretch=1)
+        self.source_header_label = QLabel("ОРИГИНАЛ")
+        self.source_header_label.setObjectName("SourceHeaderLabel")
+        top_row.addWidget(self.source_header_label)
 
-        self.edit_source_btn = QPushButton("✏")
-        self.edit_source_btn.setObjectName("CardSmallIconBtn")
-        self.edit_source_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.edit_source_btn.setToolTip("Редактировать исходный текст перед повторным запросом (Этап 6.1)")
-        self.edit_source_btn.clicked.connect(self.toggle_edit_source)
-        top_row.addWidget(self.edit_source_btn)
+        self.status_badge = QLabel("Ожидание")
+        self.status_badge.setObjectName("CardStatusIdle")
+        top_row.addWidget(self.status_badge)
+
+        self.project_badge = QLabel("")
+        self.project_badge.setObjectName("CardProjectBadge")
+        self.project_badge.hide()
+        top_row.addWidget(self.project_badge)
 
         self.action_badge = QLabel("")
         self.action_badge.setObjectName("CardActionBadge")
         self.action_badge.hide()
         top_row.addWidget(self.action_badge)
 
-        self.edited_badge = QLabel("✎ изменено")
+        self.edited_badge = QLabel("изменено")
         self.edited_badge.setObjectName("CardEditedBadge")
         self.edited_badge.setToolTip("Результат был отредактирован вручную")
         self.edited_badge.hide()
         top_row.addWidget(self.edited_badge)
 
-        self.delete_btn = QPushButton("✕")
+        top_row.addStretch(1)
+
+        self.edit_source_btn = QPushButton("ред.")
+        self.edit_source_btn.setObjectName("CardSmallIconBtn")
+        self.edit_source_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.edit_source_btn.setToolTip("Редактировать исходный текст перед повторным запросом (Этап 6.1)")
+        self.edit_source_btn.clicked.connect(self.toggle_edit_source)
+        top_row.addWidget(self.edit_source_btn)
+
+        self.delete_btn = QPushButton("x")
         self.delete_btn.setObjectName("DeleteCardBtn")
         self.delete_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.delete_btn.setToolTip("Удалить эту карточку из ленты (Этап 6.4)")
         self.delete_btn.clicked.connect(self.delete_requested.emit)
         top_row.addWidget(self.delete_btn)
 
-        self._layout.addLayout(top_row)
+        src_cont_layout.addLayout(top_row)
+
+        self.source_label = QLabel(self._preview(self.source_text))
+        self.source_label.setObjectName("CardSourceLabel")
+        self.source_label.setWordWrap(True)
+        src_cont_layout.addWidget(self.source_label)
+
+        self._layout.addWidget(self.source_container)
 
         # ---------------- 2. Панель редактирования исходного текста (6.1) ------
         self.source_edit_bar = QFrame()
@@ -141,19 +180,19 @@ class TranslationCard(QFrame):
         src_btn_row.setSpacing(6)
         src_btn_row.addStretch(1)
 
-        self.source_save_btn = QPushButton("✓ Применить")
+        self.source_save_btn = QPushButton("Применить")
         self.source_save_btn.setObjectName("PrimaryButton")
         self.source_save_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.source_save_btn.clicked.connect(self._save_source_text)
         src_btn_row.addWidget(self.source_save_btn)
 
-        self.source_regen_btn = QPushButton("▶ Повторить с этим текстом")
+        self.source_regen_btn = QPushButton("Повторить с этим текстом")
         self.source_regen_btn.setObjectName("SecondaryButton")
         self.source_regen_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.source_regen_btn.clicked.connect(self._save_source_and_regenerate)
         src_btn_row.addWidget(self.source_regen_btn)
 
-        self.source_cancel_btn = QPushButton("✕ Закрыть")
+        self.source_cancel_btn = QPushButton("Закрыть")
         self.source_cancel_btn.setObjectName("SecondaryButton")
         self.source_cancel_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.source_cancel_btn.clicked.connect(lambda: self.source_edit_bar.hide())
@@ -176,13 +215,13 @@ class TranslationCard(QFrame):
         self.prompt_edit_field.returnPressed.connect(self._submit_prompt_regenerate)
         prompt_edit_layout.addWidget(self.prompt_edit_field, stretch=1)
 
-        self.prompt_submit_btn = QPushButton("▶ Отправить")
+        self.prompt_submit_btn = QPushButton("Отправить")
         self.prompt_submit_btn.setObjectName("PrimaryButton")
         self.prompt_submit_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.prompt_submit_btn.clicked.connect(self._submit_prompt_regenerate)
         prompt_edit_layout.addWidget(self.prompt_submit_btn)
 
-        self.prompt_cancel_btn = QPushButton("✕")
+        self.prompt_cancel_btn = QPushButton("x")
         self.prompt_cancel_btn.setObjectName("SecondaryButton")
         self.prompt_cancel_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.prompt_cancel_btn.clicked.connect(lambda: self.prompt_edit_bar.hide())
@@ -217,13 +256,13 @@ class TranslationCard(QFrame):
         res_btn_row.setSpacing(6)
         res_btn_row.addStretch(1)
 
-        self.result_save_btn = QPushButton("✓ Сохранить правку")
+        self.result_save_btn = QPushButton("Сохранить правку")
         self.result_save_btn.setObjectName("PrimaryButton")
         self.result_save_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.result_save_btn.clicked.connect(self._save_result_edit)
         res_btn_row.addWidget(self.result_save_btn)
 
-        self.result_cancel_edit_btn = QPushButton("✕ Отмена")
+        self.result_cancel_edit_btn = QPushButton("Отмена")
         self.result_cancel_edit_btn.setObjectName("SecondaryButton")
         self.result_cancel_edit_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.result_cancel_edit_btn.clicked.connect(self._cancel_result_edit)
@@ -254,7 +293,7 @@ class TranslationCard(QFrame):
         cols_row.setSpacing(8)
 
         orig_col = QVBoxLayout()
-        self.comp_orig_title = QLabel("📄 Оригинал:")
+        self.comp_orig_title = QLabel("Оригинал:")
         self.comp_orig_title.setObjectName("DiffColHeader")
         orig_col.addWidget(self.comp_orig_title)
         self.comp_orig_box = QLabel("")
@@ -265,7 +304,7 @@ class TranslationCard(QFrame):
         cols_row.addLayout(orig_col, stretch=1)
 
         res_col = QVBoxLayout()
-        self.comp_res_title = QLabel("✨ Результат:")
+        self.comp_res_title = QLabel("Результат:")
         self.comp_res_title.setObjectName("DiffColHeader")
         res_col.addWidget(self.comp_res_title)
         self.comp_res_box = QLabel("")
@@ -279,7 +318,7 @@ class TranslationCard(QFrame):
 
         # Блок пословных различий
         diff_hdr_row = QHBoxLayout()
-        self.diff_header_label = QLabel("🔍 Пословные различия (Diff):")
+        self.diff_header_label = QLabel("Пословные различия (Diff):")
         self.diff_header_label.setObjectName("DiffSectionHeader")
         diff_hdr_row.addWidget(self.diff_header_label)
 
@@ -327,7 +366,7 @@ class TranslationCard(QFrame):
         row.addStretch(1)
 
         # Кнопка отмены активного запроса (Этап 6.6)
-        self.cancel_button = QPushButton("✕ Отмена")
+        self.cancel_button = QPushButton("Отмена")
         self.cancel_button.setObjectName("CancelLoadingBtn")
         self.cancel_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.cancel_button.setToolTip("Отменить выполняющийся запрос к модели")
@@ -336,7 +375,7 @@ class TranslationCard(QFrame):
         row.addWidget(self.cancel_button)
 
         # Кнопка переключения сравнения (Этап 6.3)
-        self.diff_btn = QPushButton("🔍 Сравнить")
+        self.diff_btn = QPushButton("Сравнить")
         self.diff_btn.setObjectName("DiffToggleBtn")
         self.diff_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.diff_btn.setToolTip("Переключить отображение: Компактный вид ↔ Сравнение оригинала и результата с различиями")
@@ -365,6 +404,14 @@ class TranslationCard(QFrame):
         self.copy_button.clicked.connect(self._copy_result)
         row.addWidget(self.copy_button)
 
+        self.details_btn = QPushButton("Подробнее")
+        self.details_btn.setObjectName("CardDetailsBtn")
+        self.details_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.details_btn.setToolTip("Показать технические подробности ошибки (диагностика)")
+        self.details_btn.clicked.connect(self._toggle_tech_details)
+        self.details_btn.hide()
+        row.addWidget(self.details_btn)
+
         self.more_menu_btn = QPushButton("⋯")
         self.more_menu_btn.setObjectName("MoreMenuBtn")
         self.more_menu_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -373,6 +420,31 @@ class TranslationCard(QFrame):
         row.addWidget(self.more_menu_btn)
 
         self._layout.addLayout(row)
+
+        # Диагностическая панель подробностей (Этап 9.6)
+        self.tech_details_frame = QFrame()
+        self.tech_details_frame.setObjectName("CardTechnicalDetails")
+        tech_lay = QVBoxLayout(self.tech_details_frame)
+        tech_lay.setContentsMargins(10, 8, 10, 8)
+        tech_lay.setSpacing(6)
+
+        self.tech_details_text = QLabel("")
+        self.tech_details_text.setObjectName("CardTechnicalDetailsText")
+        self.tech_details_text.setWordWrap(True)
+        self.tech_details_text.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        tech_lay.addWidget(self.tech_details_text)
+
+        log_row = QHBoxLayout()
+        log_row.addStretch(1)
+        self.open_log_btn = QPushButton("Открыть файл журнала")
+        self.open_log_btn.setObjectName("SecondaryButton")
+        self.open_log_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.open_log_btn.clicked.connect(self._open_diag_log)
+        log_row.addWidget(self.open_log_btn)
+        tech_lay.addLayout(log_row)
+
+        self.tech_details_frame.hide()
+        self._layout.addWidget(self.tech_details_frame)
 
         if result_text is None:
             self.start_loading()
@@ -399,14 +471,14 @@ class TranslationCard(QFrame):
         self.copy_text(text)
 
     def copy_text(self, text: str) -> None:
-        """Копирует указанный текст в буфер и показывает индикацию «Скопировано ✓»."""
+        """Копирует указанный текст в буфер и показывает индикацию «Скопировано»."""
         if not text:
             return
         try:
             pyperclip.copy(text)
         except Exception:
             pass
-        self.copy_button.setText("Скопировано ✓")
+        self.copy_button.setText("Скопировано")
         self.copy_button.setObjectName("CopyButtonDone")
         repolish(self.copy_button)
         self._copy_timer.start()
@@ -416,11 +488,98 @@ class TranslationCard(QFrame):
         self.copy_button.setObjectName("CopyButton")
         repolish(self.copy_button)
 
+    # -------------------------------------------------- статусы и таймер (9.3)
+    def _start_elapsed_timer(self) -> None:
+        if self._start_time <= 0:
+            self._start_time = time.monotonic()
+        if not self._status_timer.isActive():
+            self._status_timer.start()
+
+    def _stop_elapsed_timer(self) -> None:
+        self._status_timer.stop()
+
+    def _update_status_elapsed(self) -> None:
+        if self._start_time <= 0:
+            return
+        elapsed = time.monotonic() - self._start_time
+        if self._current_status in ("generating", "генерация ответа", "генерация"):
+            self.status_badge.setText(f"Генерация ответа ({elapsed:.1f} с)...")
+        elif self._current_status in ("sending", "отправка запроса", "отправка"):
+            self.status_badge.setText(f"Отправка запроса ({elapsed:.1f} с)...")
+        elif self._current_status in ("capturing", "получение текста"):
+            self.status_badge.setText(f"Получение текста ({elapsed:.1f} с)...")
+
+    def set_status(self, state: str, details: str = "") -> None:
+        """Обновляет статус операции в соответствии с этапами конвейера (Этап 9.3)."""
+        raw = (state or "").lower().strip()
+        self._current_status = raw
+
+        if raw in ("idle", "ожидание"):
+            self._stop_elapsed_timer()
+            self._start_time = 0.0
+            self.status_badge.setText("Ожидание")
+            self.status_badge.setObjectName("CardStatusIdle")
+        elif raw in ("capturing", "получение текста", "получение"):
+            self._start_elapsed_timer()
+            self.status_badge.setText("Получение текста...")
+            self.status_badge.setObjectName("CardStatusCapturing")
+        elif raw in ("sending", "отправка запроса", "отправка"):
+            self._start_elapsed_timer()
+            self.status_badge.setText("Отправка запроса...")
+            self.status_badge.setObjectName("CardStatusSending")
+        elif raw in ("generating", "генерация ответа", "генерация"):
+            self._start_elapsed_timer()
+            elapsed = time.monotonic() - self._start_time if self._start_time > 0 else 0.0
+            if elapsed >= 1.5:
+                self.status_badge.setText(f"Генерация ответа ({elapsed:.1f} с)...")
+            else:
+                self.status_badge.setText("Генерация ответа...")
+            self.status_badge.setObjectName("CardStatusGenerating")
+        elif raw in ("ready", "готово", "выполнено"):
+            elapsed = time.monotonic() - self._start_time if self._start_time > 0 else 0.0
+            self._stop_elapsed_timer()
+            if elapsed >= 1.0:
+                self.status_badge.setText(f"Готово ({elapsed:.1f} с)")
+            else:
+                self.status_badge.setText("Готово")
+            self.status_badge.setObjectName("CardStatusReady")
+        elif raw in ("error", "ошибка"):
+            self._stop_elapsed_timer()
+            self.status_badge.setText("Ошибка")
+            self.status_badge.setObjectName("CardStatusError")
+        elif raw in ("cancelled", "отменено", "отмена"):
+            self._stop_elapsed_timer()
+            self.status_badge.setText("Отменено")
+            self.status_badge.setObjectName("CardStatusCancelled")
+        else:
+            self.status_badge.setText(state)
+            self.status_badge.setObjectName("CardStatusIdle")
+
+        repolish(self.status_badge)
+
+    def _toggle_tech_details(self) -> None:
+        """Переключает видимость панели технических подробностей ошибки (Этап 9.6)."""
+        vis = not self.tech_details_frame.isVisible()
+        self.tech_details_frame.setVisible(vis)
+        self.details_btn.setText("Скрыть" if vis else "Подробнее")
+
+    def _open_diag_log(self) -> None:
+        """Открывает файл truniversal_diag.log в системном редакторе (Этап 9.6)."""
+        try:
+            from diagnostics import _log_path
+            path = _log_path()
+            if not path.exists():
+                path.write_text("Лог диагностики Truniversal\n", encoding="utf-8")
+            os.startfile(str(path))
+        except Exception:
+            pass
+
     # -------------------------------------------------- загрузка/результат
     def start_loading(self) -> None:
         """Карточка переходит в режим ожидания ответа."""
         self._loading = True
         self._frame_index = 0
+        self.set_status("sending")
         self.result_label.setObjectName("CardResultLabel")
         repolish(self.result_label)
         self.result_label.setText(LOADING_FRAMES[0])
@@ -428,6 +587,8 @@ class TranslationCard(QFrame):
         self.result_edit_bar.hide()
         self.variants_container.hide()
         self.comparison_panel.hide()
+        self.details_btn.hide()
+        self.tech_details_frame.hide()
 
         # Кнопки при загрузке: показываем «Отмена», отключаем действия с результатом
         self.cancel_button.show()
@@ -449,9 +610,12 @@ class TranslationCard(QFrame):
         """Обработка готового ответа модели: проверка вариантов, обновление интерфейса."""
         self._loading = False
         self._loading_timer.stop()
+        self.set_status("ready")
         self.result_text = text
         self.edited_text = None
         self.edited_badge.hide()
+        self.details_btn.hide()
+        self.tech_details_frame.hide()
 
         # Прячем кнопку отмены
         self.cancel_button.hide()
@@ -484,10 +648,11 @@ class TranslationCard(QFrame):
         if self._comparison_mode:
             self._update_comparison_data()
 
-    def set_error(self, message: str) -> None:
-        """Понятная ошибка выполнения запроса."""
+    def set_error(self, message: str, details: str = "") -> None:
+        """Понятная ошибка выполнения запроса с диагностикой (Этап 9.6)."""
         self._loading = False
         self._loading_timer.stop()
+        self.set_status("error")
         self.result_text = None
         self.edited_text = None
         self.edited_badge.hide()
@@ -498,7 +663,7 @@ class TranslationCard(QFrame):
 
         self.result_label.setObjectName("CardErrorLabel")
         repolish(self.result_label)
-        self.result_label.setText("⚠ " + message)
+        self.result_label.setText(message)
         self.result_label.show()
 
         self.copy_button.setVisible(False)
@@ -507,13 +672,25 @@ class TranslationCard(QFrame):
         self.regenerate_button.setEnabled(True)
         self.diff_btn.hide()
 
+        self.technical_details = (details or "").strip()
+        if self.technical_details:
+            self.tech_details_text.setText(self.technical_details)
+            self.details_btn.setText("Подробнее")
+            self.details_btn.show()
+        else:
+            self.details_btn.hide()
+            self.tech_details_frame.hide()
+
     def set_cancelled(self) -> None:
         """Запрос был отменён пользователем (Этап 6.6)."""
         self._loading = False
         self._loading_timer.stop()
+        self.set_status("cancelled")
         self.result_text = None
         self.edited_text = None
         self.edited_badge.hide()
+        self.details_btn.hide()
+        self.tech_details_frame.hide()
 
         self.cancel_button.hide()
         self.variants_container.hide()
@@ -573,6 +750,7 @@ class TranslationCard(QFrame):
             self.edited_text = val
             self.result_label.setText(val)
             self.edited_badge.show()
+            self.result_edited.emit(val)
         self.result_edit_bar.hide()
         self.result_label.show()
         if self._comparison_mode:
@@ -604,7 +782,7 @@ class TranslationCard(QFrame):
 
             # Шапка варианта
             hdr = QHBoxLayout()
-            t_lbl = QLabel(f"📌 {title}")
+            t_lbl = QLabel(title)
             t_lbl.setObjectName("VariantTitle")
             hdr.addWidget(t_lbl, stretch=1)
 
@@ -647,7 +825,7 @@ class TranslationCard(QFrame):
         except Exception:
             pass
         orig_text = btn.text()
-        btn.setText("Скопировано ✓")
+        btn.setText("Скопировано")
         QTimer.singleShot(1000, lambda: btn.setText(orig_text))
 
     # ---------------- 6.3. Сравнение оригинала и результата (Diff) -----------
@@ -705,24 +883,35 @@ class TranslationCard(QFrame):
         menu = QMenu(self)
         menu.setObjectName("CardMoreMenu")
 
-        act_edit = menu.addAction("✏ Редактировать результат")
+        act_edit = menu.addAction("Редактировать результат")
         act_edit.triggered.connect(self.toggle_edit_result)
 
-        act_src = menu.addAction("✏ Редактировать исходный текст")
+        act_src = menu.addAction("Редактировать исходный текст")
         act_src.triggered.connect(self.toggle_edit_source)
 
-        act_prm = menu.addAction("💬 Изменить промпт и повторить...")
+        act_prm = menu.addAction("Изменить промпт и повторить...")
         act_prm.triggered.connect(self.toggle_edit_prompt)
 
-        act_diff = menu.addAction("🔍 Сравнить оригинал и результат")
+        act_diff = menu.addAction("Сравнить оригинал и результат")
         act_diff.triggered.connect(self.toggle_comparison)
 
         menu.addSeparator()
 
-        act_del = menu.addAction("🗑 Удалить карточку")
+        act_del = menu.addAction("Удалить карточку")
         act_del.triggered.connect(self.delete_requested.emit)
 
         menu.exec(QCursor.pos())
+
+    # ---------------- Проект (Этап 8)
+    def set_project(self, project_name: str) -> None:
+        """Отображает бейдж активного проекта."""
+        name = (project_name or "").strip()
+        if name:
+            self.project_badge.setText(f"Проект: {name}")
+            self.project_badge.setToolTip(f"Операция в рамках проекта «{name}»")
+            self.project_badge.show()
+        else:
+            self.project_badge.hide()
 
     # ---------------- AI-действие (Этап 5)
     def set_action(self, action_id: str, action_name: str) -> None:
@@ -730,7 +919,7 @@ class TranslationCard(QFrame):
         self.action_id = action_id
         self.action_name = action_name
         if action_name:
-            self.action_badge.setText(f"⚡ {action_name}")
+            self.action_badge.setText(action_name)
             self.action_badge.show()
         else:
             self.action_badge.hide()

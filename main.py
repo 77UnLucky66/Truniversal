@@ -30,7 +30,7 @@ import os
 import sys
 from typing import Optional
 
-from PyQt6.QtCore import QPointF, QRectF, Qt
+from PyQt6.QtCore import QPointF, QRectF, Qt, QTimer
 from PyQt6.QtGui import (QColor, QIcon, QLinearGradient, QPainter, QPen,
                          QPixmap)
 from PyQt6.QtWidgets import (QApplication, QMenu, QMessageBox,
@@ -39,9 +39,10 @@ from PyQt6.QtWidgets import (QApplication, QMenu, QMessageBox,
 from config import ConfigManager
 from hotkey_manager import HotkeyManager
 from mini_window import MiniPopupWindow
+from project_manager import get_project_manager
 from settings_window import SettingsWindow
 from single_instance import SingleInstanceGuard
-from styles import APP_QSS
+from styles import APP_QSS, apply_theme
 from workers import wait_for_workers
 
 APP_NAME = "Truniversal"
@@ -123,6 +124,11 @@ class TrayApp:
         self.app_icon = create_app_icon()
         self.app.setWindowIcon(self.app_icon)
 
+        # Применение сохранённой темы и размера шрифта (Этап 9.2)
+        theme = self.config.get_theme() if hasattr(self.config, "get_theme") else "dark"
+        font_size = self.config.get_font_size() if hasattr(self.config, "get_font_size") else "medium"
+        apply_theme(self.app, theme, font_size)
+
         # Окна создаём лениво и храним ссылки: повторный клик по меню
         # не плодит копии, а просто поднимает уже открытое окно.
         self._settings_window: Optional[SettingsWindow] = None
@@ -133,12 +139,34 @@ class TrayApp:
         self.tray.setToolTip(f"{APP_NAME} — помощник переводчика")
 
         self.menu = QMenu()
-        action_settings = self.menu.addAction("Открыть настройки")
-        action_settings.triggered.connect(self.show_settings)
-
         action_mini = self.menu.addAction("Открыть мини-окно")
         # lambda, чтобы triggered(bool) не передавал checked в captured_text
         action_mini.triggered.connect(lambda: self.show_mini_window())
+
+        action_settings = self.menu.addAction("Открыть настройки")
+        action_settings.triggered.connect(self.show_settings)
+
+        action_history = self.menu.addAction("История операций")
+        action_history.triggered.connect(self.show_history_window)
+
+        # Подменю выбора действия (Этап 9.5)
+        self.actions_menu = self.menu.addMenu("Выбрать действие")
+        self.actions_menu.aboutToShow.connect(self._refresh_tray_actions_menu)
+        self._refresh_tray_actions_menu()
+
+        # Быстрое переключение проектов из трея (Этап 8)
+        self.projects_menu = self.menu.addMenu("Проекты")
+        self.projects_menu.aboutToShow.connect(self._refresh_tray_projects_menu)
+        self._refresh_tray_projects_menu()
+
+        self.menu.addSeparator()
+
+        # Приостановить работу (Этап 9.5)
+        self.pause_action = self.menu.addAction("Приостановить работу")
+        self.pause_action.setCheckable(True)
+        is_paused = bool(self.config.is_app_paused() if hasattr(self.config, "is_app_paused") else False)
+        self.pause_action.setChecked(is_paused)
+        self.pause_action.toggled.connect(self._toggle_app_paused)
 
         # Быстрое включение/выключение хоткея, не открывая настройки.
         self.hotkey_toggle = self.menu.addAction("Глобальный хоткей")
@@ -164,6 +192,10 @@ class TrayApp:
         self.hotkey_manager.text_captured.connect(self._on_text_captured)
         self.hotkey_manager.action_captured.connect(self._on_action_captured)
         self.hotkey_manager.capture_failed.connect(self._on_capture_failed)
+
+        if is_paused:
+            self.hotkey_manager.set_enabled(False)
+
         start_status = self.hotkey_manager.start()
         if start_status == "failed":
             # Без хоткея приложение почти бесполезно — честно предупреждаем.
@@ -190,7 +222,20 @@ class TrayApp:
         # "disabled" — пользователь сам выключил хоткей; тултип скажет,
         # как включить обратно. Балун не нужен.
 
+        # Автоматическая очистка истории по сроку хранения (Этап 7.3)
+        try:
+            retention_days = self.config.get_history_retention_days() if hasattr(self.config, "get_history_retention_days") else 0
+            if retention_days > 0:
+                from history_manager import get_history_manager
+                get_history_manager().apply_retention_policy(retention_days)
+        except Exception:
+            pass
+
         self._refresh_tray_tooltip()
+
+        # Мастер первоначальной настройки (Этап 9.4)
+        if hasattr(self.config, "is_first_run_completed") and not self.config.is_first_run_completed():
+            QTimer.singleShot(250, self.show_first_run_wizard)
 
     # ------------------------------------------------------------------ трей
     def _on_tray_activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
@@ -218,7 +263,128 @@ class TrayApp:
             # Окно настроек сообщает об изменениях — обновляем мини-окно и трей.
             self._settings_window.prompts_changed.connect(self._on_prompts_changed)
             self._settings_window.hotkey_changed.connect(self._on_hotkey_changed)
+            self._settings_window.open_card_requested.connect(self._on_history_open_card)
+            self._settings_window.repeat_request_requested.connect(self._on_history_repeat_request)
+            self._settings_window.projects_changed.connect(self._on_projects_changed)
         self._show_and_focus(self._settings_window)
+
+    def show_history_window(self) -> None:
+        """«История операций» — открывает окно настроек на вкладке истории (Этап 7.2)."""
+        self.show_settings()
+        if self._settings_window is not None:
+            self._settings_window.open_history_tab()
+
+    def show_projects_window(self) -> None:
+        """«Проекты и Глоссарий» — открывает окно настроек на вкладке проектов (Этап 8)."""
+        self.show_settings()
+        if self._settings_window is not None:
+            self._settings_window.open_projects_tab()
+
+    def _refresh_tray_projects_menu(self) -> None:
+        """Обновляет подменю проектов в трее (список проектов + галочка активного)."""
+        self.projects_menu.clear()
+        pm = get_project_manager()
+        active_pid = pm.get_active_project_id()
+        projects = pm.list_projects()
+
+        # Пункт "Без проекта (общий)"
+        no_proj_act = self.projects_menu.addAction("Без проекта (общий)")
+        no_proj_act.setCheckable(True)
+        no_proj_act.setChecked(not bool(active_pid))
+        no_proj_act.triggered.connect(lambda: self._set_active_project(""))
+
+        if projects:
+            self.projects_menu.addSeparator()
+            for p in projects:
+                pid = p.get("id", "")
+                pname = p.get("name", "Без названия")
+                is_act = (pid == active_pid)
+                act = self.projects_menu.addAction(pname)
+                act.setCheckable(True)
+                act.setChecked(is_act)
+                act.triggered.connect(lambda checked, project_id=pid: self._set_active_project(project_id))
+
+        self.projects_menu.addSeparator()
+        manage_act = self.projects_menu.addAction("Управление проектами...")
+        manage_act.triggered.connect(self.show_projects_window)
+
+    def _refresh_tray_actions_menu(self) -> None:
+        """Обновляет подменю выбора действий в трее (Этап 9.5)."""
+        self.actions_menu.clear()
+        actions = self.config.get_actions() if hasattr(self.config, "get_actions") else []
+        active_id = self.config.get_active_action_id() if hasattr(self.config, "get_active_action_id") else ""
+        for act in actions:
+            aid = act["id"]
+            name = act["name"]
+            item = self.actions_menu.addAction(name)
+            item.setCheckable(True)
+            item.setChecked(aid == active_id)
+            item.triggered.connect(lambda checked=False, a_id=aid: self._set_active_action_from_tray(a_id))
+
+    def _set_active_action_from_tray(self, action_id: str) -> None:
+        """Переключает активное действие из меню трея (Этап 9.5)."""
+        if hasattr(self.config, "set_active_action"):
+            self.config.set_active_action(action_id)
+        self._refresh_tray_actions_menu()
+        if self._mini_window is not None:
+            self._mini_window.refresh_from_config()
+
+    def _toggle_app_paused(self, paused: bool) -> None:
+        """Приостанавливает/возобновляет работу приложения (Этап 9.5)."""
+        if hasattr(self.config, "set_app_paused"):
+            self.config.set_app_paused(paused)
+        else:
+            self.config.set("app_paused", paused)
+        self.hotkey_manager.set_enabled(not paused)
+        self._refresh_tray_tooltip()
+
+    def show_first_run_wizard(self) -> None:
+        """Запуск мастера первоначальной настройки (Этап 9.4)."""
+        try:
+            from first_run_wizard import FirstRunWizard
+            wizard = FirstRunWizard(self.config)
+            wizard.exec()
+            self._refresh_tray_tooltip()
+            self._sync_hotkey_menu_state()
+            if self._mini_window is not None:
+                self._mini_window.refresh_from_config()
+        except Exception:
+            pass
+
+    def _set_active_project(self, project_id: str) -> None:
+        """Переключает активный проект из любого интерфейса (трей, мини-окно, настройки)."""
+        pm = get_project_manager()
+        pm.set_active_project_id(project_id)
+        if hasattr(self.config, "set_active_project_id"):
+            self.config.set_active_project_id(project_id)
+        self._refresh_tray_projects_menu()
+        if self._mini_window is not None:
+            self._mini_window.refresh_from_config()
+        if self._settings_window is not None:
+            self._settings_window.refresh_from_config()
+
+    def _on_active_project_changed(self, project_id: str) -> None:
+        """Обработчик изменения проекта из мини-окна."""
+        self._set_active_project(project_id)
+
+    def _on_projects_changed(self) -> None:
+        """Обработчик изменения проектов из окна настроек."""
+        self._refresh_tray_projects_menu()
+        if self._mini_window is not None:
+            self._mini_window.refresh_from_config()
+
+    def _on_history_open_card(self, record: dict) -> None:
+        """Отображает карточку из постоянной истории в мини-окне (Этап 7.2)."""
+        if self._mini_window is None:
+            self.show_mini_window()
+        if self._mini_window is not None:
+            self._mini_window.display_history_card(record)
+
+    def _on_history_repeat_request(self, record: dict) -> None:
+        """Повторный запуск запроса из истории (Этап 7.2)."""
+        src = str(record.get("source_text", ""))
+        aid = record.get("action_id", "")
+        self.show_mini_window(captured_text=src, action_id=aid)
 
     def _on_prompts_changed(self) -> None:
         """Пресеты пересохранены — освежаем панель мини-окна (если открыто)."""
@@ -266,6 +432,9 @@ class TrayApp:
             self._mini_window = MiniPopupWindow(
                 self.config, self.app_icon, self.hotkey_manager
             )
+            self._mini_window.history_requested.connect(self.show_history_window)
+            self._mini_window.projects_requested.connect(self.show_projects_window)
+            self._mini_window.project_changed.connect(self._on_active_project_changed)
         if captured_text is not None:
             self._mini_window.handle_new_text(captured_text, action_id=action_id)
         else:
@@ -277,10 +446,14 @@ class TrayApp:
     # нельзя, поэтому здесь только «пересадка» на мини-окно.
     def _on_text_captured(self, text: str) -> None:
         """Готовый выделенный текст → карточка «Думаю…» в мини-окне."""
+        if hasattr(self.config, "is_app_paused") and self.config.is_app_paused():
+            return
         self.show_mini_window(captured_text=text)
 
     def _on_action_captured(self, text: str, action_id: str) -> None:
         """Готовый текст по выделенному хоткею действия → мини-окно с этим действием."""
+        if hasattr(self.config, "is_app_paused") and self.config.is_app_paused():
+            return
         self.show_mini_window(captured_text=text, action_id=action_id)
 
     def _on_capture_failed(self, message: str) -> None:
@@ -290,7 +463,10 @@ class TrayApp:
         )
 
     def _refresh_tray_tooltip(self) -> None:
-        """Тултип иконки трея: хоткей, либо почему его нет."""
+        """Тултип иконки трея: хоткей, состояние паузы либо почему его нет (Этап 9.5)."""
+        if hasattr(self.config, "is_app_paused") and self.config.is_app_paused():
+            self.tray.setToolTip(f"{APP_NAME} — Работа приостановлена")
+            return
         tip = f"{APP_NAME} — помощник переводчика"
         hotkey = (self.config.get("hotkey") or "").strip()
         if bool(self.config.get("hotkey_enabled", True)):

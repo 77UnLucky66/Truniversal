@@ -42,11 +42,16 @@ def run() -> int:
     with tempfile.TemporaryDirectory() as tmp_dir:
         cfg = ConfigManager(Path(tmp_dir) / "config.json")
 
-        # 2. Окно настроек: три вкладки, ползунки, пресеты, хоткеи, сохранение.
+        # 2. Окно настроек: вкладки, ползунки, пресеты, хоткеи, сохранение.
         settings = SettingsWindow(cfg, icon)
         settings.show()
         assert settings.windowTitle().startswith("Truniversal")
-        assert settings.tabs.count() == 3
+        assert settings.tabs.count() == 5
+        assert settings.tabs.tabText(0) == "Модели и Параметры ИИ"
+        assert settings.tabs.tabText(1) == "Мои Промпты"
+        assert settings.tabs.tabText(2) == "История операций"
+        assert settings.tabs.tabText(3) == "Проекты"
+        assert settings.tabs.tabText(4) == "Настройки"
         # Вкладка 1: значения из конфига, ползунки синхронизированы.
         assert settings.api_url_edit.text() == cfg.get("api_url")
         assert settings.model_combo.currentText() == cfg.get("model_name")
@@ -242,7 +247,7 @@ def run() -> int:
         ctrl = m.TrayApp(app, config_path=Path(tray_dir) / "config.json")
         actions = [a.text() for a in ctrl.menu.actions() if a.text()]
         assert actions == [
-            "Открыть настройки", "Открыть мини-окно", "Глобальный хоткей", "Выход"
+            "Открыть мини-окно", "Открыть настройки", "История операций", "Выбрать действие", "Проекты", "Приостановить работу", "Глобальный хоткей", "Выход"
         ], actions
         assert ctrl.hotkey_manager.hotkey == ctrl.config.get("hotkey"), "хоткей не зарегистрирован"
         assert ctrl.hotkey_toggle.isChecked()

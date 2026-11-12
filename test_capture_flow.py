@@ -198,7 +198,7 @@ def run() -> int:
         count = []
         done = threading.Event()
 
-        def fake_capture():
+        def fake_capture(*args, **kwargs):
             count.append(1)
             done.set()
 

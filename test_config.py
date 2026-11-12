@@ -31,7 +31,9 @@ def run_tests() -> None:
         assert cm.get("temperature") == 0.3
         assert cm.get("top_p") == 0.9
         assert cm.get("active_prompt_name") == "Живой перевод"
-        assert cm.get("config_version") == 2
+        assert cm.get("config_version") == 4
+        assert cm.get("history_enabled") is True
+        assert cm.get("history_retention_days") == 0
         assert cm.get("hotkey_enabled") is True
         assert cm.get("diagnostics") is False
         assert cm.get("capture_delay_ms") == 120
@@ -96,9 +98,9 @@ def run_tests() -> None:
         raw.pop("config_version", None)
         cfg_path.write_text(json.dumps(raw, ensure_ascii=False), encoding="utf-8")
         cm_migrated = ConfigManager(cfg_path)
-        assert cm_migrated.get("config_version") == 2
+        assert cm_migrated.get("config_version") == 4
         on_disk = json.loads(cfg_path.read_text(encoding="utf-8"))
-        assert on_disk["config_version"] == 2, "версия не штампуется на диск"
+        assert on_disk["config_version"] == 4, "версия не штампуется на диск"
         print("[OK] 7. Конфиг без версии мигрируется и штампуется на диске")
 
         # 8. Конфиг из БУДУЩЕЙ версии читается без потерь и не откатывается
@@ -136,7 +138,7 @@ def run_tests() -> None:
         assert cm_reset.reset_to_defaults() is True
         assert cm_reset.get("hotkey") == "alt+q"
         assert "Мой личный промпт" not in cm_reset.get("prompts")
-        assert cm_reset.get("config_version") == 2
+        assert cm_reset.get("config_version") == 4
         assert ConfigManager(cfg_path).data == cm_reset.data
         print("[OK] 11. Сброс к дефолтам возвращает исходное состояние")
 
@@ -298,16 +300,34 @@ def run_tests() -> None:
         }
         cfg_path.write_text(json.dumps(v1_cfg, ensure_ascii=False), encoding="utf-8")
         cm20 = ConfigManager(cfg_path)
-        assert cm20.get("config_version") == 2
+        assert cm20.get("config_version") == 4
         active20 = cm20.get_active_profile()
         assert active20 is not None
         assert active20["api_url"] == "https://api.mycustomai.com/v1/chat/completions"
         assert active20["model_name"] == "my-custom-model"
         assert active20["temperature"] == 0.42
         assert cm20.get_profile_api_key(active20["id"]) == "v1-migrated-secret"
-        print("[OK] 20. Этап 3: Миграция старого конфига v1 → v2 с профилями и защитой ключей")
+        print("[OK] 20. Этап 3: Миграция старого конфига v1 → v4 с профилями и защитой ключей")
 
-    print("\nВсе проверки конфигурации пройдены (Этапы 1–3)")
+        # 21. Этап 7: Настройки истории и методы доступа
+        assert cm20.is_history_enabled() is True
+        cm20.set_history_enabled(False)
+        assert cm20.is_history_enabled() is False
+        assert cm20.get_history_retention_days() == 0
+        cm20.set_history_retention_days(30)
+        assert cm20.get_history_retention_days() == 30
+        print("[OK] 21. Этап 7: Настройки истории операций и миграция v2 -> v4")
+
+        # 22. Этап 8: Настройки проектов и разового контекста
+        assert cm20.get_active_project_id() == ""
+        cm20.set_active_project_id("proj-xyz")
+        assert cm20.get_active_project_id() == "proj-xyz"
+        assert cm20.get_ad_hoc_context() == ""
+        cm20.set_ad_hoc_context("Саркастичный тон")
+        assert cm20.get_ad_hoc_context() == "Саркастичный тон"
+        print("[OK] 22. Этап 8: Настройки проектов и ad-hoc контекста (v4)")
+
+    print("\nВсе проверки конфигурации пройдены (Этапы 1–8)")
 
 
 if __name__ == "__main__":

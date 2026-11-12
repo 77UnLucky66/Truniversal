@@ -14,6 +14,7 @@ a = Analysis(
         'requests',
         'pyperclip',
         'keyboard',
+        'sqlite3',
     ],
     hookspath=[],
     hooksconfig={},

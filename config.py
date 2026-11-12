@@ -58,6 +58,8 @@ def app_dir() -> Path:
 # Допустимые значения ключевых полей (лёгкая валидация при загрузке).
 VALID_MODES: tuple[str, ...] = ("ai", "standard")
 VALID_STANDARD_ENGINES: tuple[str, ...] = ("google", "deepl")
+VALID_THEMES: tuple[str, ...] = ("dark", "light", "system")
+VALID_FONT_SIZES: tuple[str, ...] = ("small", "medium", "large")
 
 # ---------------------------------------------------------------------------
 # Версионирование схемы конфигурации + последовательные миграции (Этап 1).
@@ -71,7 +73,7 @@ VALID_STANDARD_ENGINES: tuple[str, ...] = ("google", "deepl")
 #     с дефолтами даёт новым ключам значения из кода, неизвестные ключи
 #     сохраняются как есть.
 # ---------------------------------------------------------------------------
-CONFIG_VERSION = 2
+CONFIG_VERSION = 4
 
 # ---------------------------------------------------------------------------
 # Предустановленные AI-профили (ЭТАП 3)
@@ -189,9 +191,23 @@ def _migrate_v1_to_v2(cfg: Dict[str, Any]) -> None:
     cfg["ai_profiles"] = profiles
 
 
+def _migrate_v2_to_v3(cfg: Dict[str, Any]) -> None:
+    """Миграция v2 -> v3: параметры постоянной истории операций (Этап 7)."""
+    cfg.setdefault("history_enabled", True)
+    cfg.setdefault("history_retention_days", 0)  # 0 = бессрочно
+
+
+def _migrate_v3_to_v4(cfg: Dict[str, Any]) -> None:
+    """Миграция v3 -> v4: параметры проектного режима и расширенного контекста (Этап 8)."""
+    cfg.setdefault("active_project_id", "")
+    cfg.setdefault("ad_hoc_context", "")
+
+
 # Номер исходной версии → функция cfg → cfg (один шаг миграции).
 _CONFIG_MIGRATIONS = {
     1: _migrate_v1_to_v2,
+    2: _migrate_v2_to_v3,
+    3: _migrate_v3_to_v4,
 }
 
 # ---------------------------------------------------------------------------
@@ -471,10 +487,24 @@ def format_prompt_template(
     res = res.replace("{target_lang}", str(target_lang))
     res = res.replace("{source_lang}", str(source_lang))
 
-    ctx_str = f"Контекст проекта: {project_context.strip()}." if (project_context or "").strip() else ""
+    if (project_context or "").strip():
+        p_clean = project_context.strip()
+        if p_clean.startswith("ПРАВИЛА") or p_clean.startswith("КОНТЕКСТ") or p_clean.startswith("ПРЕДШЕСТВУЮЩИЙ"):
+            ctx_str = p_clean
+        else:
+            ctx_str = f"Контекст проекта: {p_clean}."
+    else:
+        ctx_str = ""
     res = res.replace("{project_context}", ctx_str)
 
-    glo_str = f"Глоссарий терминов:\n{glossary.strip()}" if (glossary or "").strip() else ""
+    if (glossary or "").strip():
+        g_clean = glossary.strip()
+        if g_clean.startswith("УТВЕРЖДЁННЫЙ ГЛОССАРИЙ"):
+            glo_str = g_clean
+        else:
+            glo_str = f"Глоссарий терминов:\n{g_clean}"
+    else:
+        glo_str = ""
     res = res.replace("{glossary}", glo_str)
 
     if "{text}" in res:
@@ -523,6 +553,25 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "active_action_id": "action_trans_literary",
     "project_context": "",
     "glossary": "",
+    # --- Постоянная история операций (Этап 7) --------------------------------
+    "history_enabled": True,             # сохранять операции в локальную базу данных SQLite
+    "history_retention_days": 0,         # срок хранения: 0 = бессрочно, 7/30/90/180/365
+    # --- Проекты и расширенный контекст (Этап 8) -----------------------------
+    "active_project_id": "",             # ID активного проекта в project_manager
+    "ad_hoc_context": "",                # разовое примечание для ближайшего перевода
+    # --- Оформление и пользовательский интерфейс (Этап 9) ---------------------
+    "theme": "dark",                     # "dark" | "light" | "system"
+    "font_size": "medium",               # "small" | "medium" | "large"
+    "popup_remember_position": True,     # запоминать положение мини-окна на экране
+    "popup_x": None,                     # сохранённая координата X
+    "popup_y": None,                     # сохранённая координата Y
+    "popup_width": 740,                  # сохранённая ширина мини-окна
+    "popup_height": 220,                 # сохранённая высота мини-окна
+    "popup_stays_on_top": True,          # окно поверх остальных окон
+    "popup_opacity": 0.98,               # прозрачность окна (0.7 - 1.0)
+    "popup_max_cards": 20,               # максимум карточек в ленте (5 - 50)
+    "first_run_completed": False,        # мастер первого запуска пройден / пропущен
+    "app_paused": False,                 # временная приостановка работы программы
 }
 
 def _clean_relaxed_json(text: str) -> str:
@@ -1182,6 +1231,40 @@ class ConfigManager:
                 prompt = next(iter(DEFAULT_PROMPTS.values()))
         return prompt
 
+    def is_history_enabled(self) -> bool:
+        return bool(self.get("history_enabled", True))
+
+    def set_history_enabled(self, enabled: bool) -> bool:
+        self.set("history_enabled", bool(enabled))
+        return self.save()
+
+    def get_history_retention_days(self) -> int:
+        try:
+            return max(int(self.get("history_retention_days", 0)), 0)
+        except (ValueError, TypeError):
+            return 0
+
+    def set_history_retention_days(self, days: int) -> bool:
+        self.set("history_retention_days", max(int(days), 0))
+        return self.save()
+
+    # --- Проекты и расширенный контекст (Этап 8) -------------------------
+    def get_active_project_id(self) -> str:
+        """Возвращает ID текущего активного проекта."""
+        return str(self.get("active_project_id", "") or "").strip()
+
+    def set_active_project_id(self, project_id: str, autosave: bool = True) -> bool:
+        """Устанавливает ID текущего активного проекта."""
+        return self.set("active_project_id", str(project_id or "").strip(), autosave=autosave)
+
+    def get_ad_hoc_context(self) -> str:
+        """Возвращает разовый контекст для ближайшего перевода."""
+        return str(self.get("ad_hoc_context", "") or "").strip()
+
+    def set_ad_hoc_context(self, text: str, autosave: bool = True) -> bool:
+        """Устанавливает разовый контекст для ближайшего перевода."""
+        return self.set("ad_hoc_context", str(text or "").strip(), autosave=autosave)
+
     # ------------------------------------------------------------- валидация
     def _normalize(self, cfg: Dict[str, Any]) -> Dict[str, Any]:
         """Мягко исправляет явно битые значения, чтобы приложение не падало."""
@@ -1330,4 +1413,109 @@ class ConfigManager:
         if not isinstance(cfg.get("glossary"), str):
             cfg["glossary"] = ""
 
+        # История операций (Этап 7)
+        if not isinstance(cfg.get("history_enabled"), bool):
+            cfg["history_enabled"] = bool(DEFAULT_CONFIG.get("history_enabled", True))
+        try:
+            cfg["history_retention_days"] = max(int(cfg.get("history_retention_days", 0)), 0)
+        except (ValueError, TypeError):
+            cfg["history_retention_days"] = 0
+
+        # Проекты и расширенный контекст (Этап 8)
+        if not isinstance(cfg.get("active_project_id"), str):
+            cfg["active_project_id"] = ""
+        if not isinstance(cfg.get("ad_hoc_context"), str):
+            cfg["ad_hoc_context"] = ""
+
+        # Оформление и пользовательский интерфейс (Этап 9)
+        if cfg.get("theme") not in VALID_THEMES:
+            cfg["theme"] = DEFAULT_CONFIG["theme"]
+        if cfg.get("font_size") not in VALID_FONT_SIZES:
+            cfg["font_size"] = DEFAULT_CONFIG["font_size"]
+
+        try:
+            op = float(cfg.get("popup_opacity", DEFAULT_CONFIG["popup_opacity"]))
+            cfg["popup_opacity"] = min(max(op, 0.70), 1.0)
+        except (TypeError, ValueError):
+            cfg["popup_opacity"] = DEFAULT_CONFIG["popup_opacity"]
+
+        try:
+            mc = int(cfg.get("popup_max_cards", DEFAULT_CONFIG["popup_max_cards"]))
+            cfg["popup_max_cards"] = min(max(mc, 5), 100)
+        except (TypeError, ValueError):
+            cfg["popup_max_cards"] = DEFAULT_CONFIG["popup_max_cards"]
+
+        for b_key in ("popup_remember_position", "popup_stays_on_top", "first_run_completed", "app_paused"):
+            val = cfg.get(b_key, DEFAULT_CONFIG.get(b_key, False))
+            if isinstance(val, str):
+                val = val.strip().lower() in ("1", "true", "yes", "on", "да")
+            cfg[b_key] = bool(val)
+
         return cfg
+
+    # ------------------------------------------------------------- Этап 9: UI и UX
+    def get_theme(self) -> str:
+        """Текущая тема: dark, light или system."""
+        return str(self.get("theme", "dark"))
+
+    def set_theme(self, theme: str, autosave: bool = True) -> None:
+        """Устанавливает тему: dark, light или system."""
+        t = (theme or "dark").lower().strip()
+        if t in VALID_THEMES:
+            self.set("theme", t, autosave=autosave)
+
+    def get_font_size(self) -> str:
+        """Размер шрифта: small, medium, large."""
+        return str(self.get("font_size", "medium"))
+
+    def set_font_size(self, size: str, autosave: bool = True) -> None:
+        """Устанавливает размер шрифта: small, medium, large."""
+        fs = (size or "medium").lower().strip()
+        if fs in VALID_FONT_SIZES:
+            self.set("font_size", fs, autosave=autosave)
+
+    def is_first_run_completed(self) -> bool:
+        """Мастер первоначальной настройки уже пройден / пропущен?"""
+        return bool(self.get("first_run_completed", False))
+
+    def set_first_run_completed(self, done: bool = True, autosave: bool = True) -> None:
+        """Помечает мастер первого запуска пройденным."""
+        self.set("first_run_completed", bool(done), autosave=autosave)
+
+    def is_app_paused(self) -> bool:
+        """Приложение временно приостановлено (хоткеи не перехватывают текст)?"""
+        return bool(self.get("app_paused", False))
+
+    def set_app_paused(self, paused: bool, autosave: bool = True) -> None:
+        """Временно приостанавливает или возобновляет работу."""
+        self.set("app_paused", bool(paused), autosave=autosave)
+
+    def get_popup_opacity(self) -> float:
+        """Прозрачность мини-окна (0.7 - 1.0)."""
+        try:
+            return float(self.get("popup_opacity", 0.98))
+        except (TypeError, ValueError):
+            return 0.98
+
+    def set_popup_opacity(self, opacity: float, autosave: bool = True) -> None:
+        """Устанавливает прозрачность мини-окна (ограничена 0.7 - 1.0)."""
+        self.set("popup_opacity", min(max(float(opacity), 0.70), 1.0), autosave=autosave)
+
+    def get_popup_max_cards(self) -> int:
+        """Максимальное число карточек в текущей сессии мини-окна."""
+        try:
+            return int(self.get("popup_max_cards", 20))
+        except (TypeError, ValueError):
+            return 20
+
+    def set_popup_max_cards(self, count: int, autosave: bool = True) -> None:
+        """Устанавливает лимит карточек (5 - 100)."""
+        self.set("popup_max_cards", min(max(int(count), 5), 100), autosave=autosave)
+
+    def is_popup_stays_on_top(self) -> bool:
+        """Закреплено ли мини-окно поверх остальных окон?"""
+        return bool(self.get("popup_stays_on_top", True))
+
+    def set_popup_stays_on_top(self, stays: bool, autosave: bool = True) -> None:
+        """Включает/выключает закрепление поверх окон."""
+        self.set("popup_stays_on_top", bool(stays), autosave=autosave)

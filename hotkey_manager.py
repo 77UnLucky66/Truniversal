@@ -90,13 +90,95 @@ if sys.platform == "win32":
     _user32.AttachThreadInput.restype = wintypes.BOOL
     _user32.keybd_event.argtypes = [ctypes.c_byte, ctypes.c_byte, wintypes.DWORD, ctypes.c_size_t]
     _user32.keybd_event.restype = None
+
+    class _KEYBDINPUT(ctypes.Structure):
+        _fields_ = [
+            ("wVk", wintypes.WORD),
+            ("wScan", wintypes.WORD),
+            ("dwFlags", wintypes.DWORD),
+            ("time", wintypes.DWORD),
+            ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong)),
+        ]
+
+    class _INPUT(ctypes.Structure):
+        class _INPUT_UNION(ctypes.Union):
+            _fields_ = [("ki", _KEYBDINPUT)]
+        _anonymous_ = ("_input",)
+        _fields_ = [
+            ("type", wintypes.DWORD),
+            ("_input", _INPUT_UNION),
+        ]
 else:
     _kernel32 = None
     _user32 = None
+    _INPUT = None
 
 
 # Модификаторы, которые пользователь может держать вместе с хоткеем.
 _MODIFIER_KEYS = ("ctrl", "alt", "shift", "windows")
+
+
+def _parse_hotkey_vks(hotkey_str: str) -> list[int]:
+    """Преобразует строку хоткея в список виртуальных кодов Win32."""
+    if not hotkey_str:
+        return []
+    vk_map = {
+        "ctrl": 0x11, "control": 0x11, "lctrl": 0xA2, "rctrl": 0xA3,
+        "alt": 0x12, "menu": 0x12, "lalt": 0xA4, "ralt": 0xA5,
+        "shift": 0x10, "lshift": 0xA0, "rshift": 0xA1,
+        "win": 0x5B, "windows": 0x5B, "lwin": 0x5B, "rwin": 0x5C,
+    }
+    for i in range(1, 13):
+        vk_map[f"f{i}"] = 0x6F + i
+    vks: list[int] = []
+    for part in (hotkey_str or "").lower().split("+"):
+        part = part.strip()
+        if part in vk_map:
+            vks.append(vk_map[part])
+        elif len(part) == 1:
+            vks.append(ord(part.upper()))
+    return vks
+
+
+def _release_all_modifiers_win32(hotkey_str: str = "") -> None:
+    """Гарантированно отпускает клавиши-модификаторы на уровне Win32."""
+    if _user32 is None:
+        return
+
+    # Собираем все клавиши, которые могли быть нажаты: базовые модификаторы + клавиши текущего хоткея
+    check_vks = {0x12, 0x11, 0x10, 0x5B, 0x5C}
+    if hotkey_str:
+        check_vks.update(_parse_hotkey_vks(hotkey_str))
+
+    # Ждём до 300 мс, пока пользователь физически отпустит клавиши
+    deadline = time.monotonic() + 0.3
+    while time.monotonic() < deadline:
+        if not any(_user32.GetAsyncKeyState(vk) & 0x8000 for vk in check_vks):
+            break
+        time.sleep(0.01)
+
+    # Логически отпускаем модификаторы ТОЛЬКО если система считает их всё ещё зажатыми
+    KEYEVENTF_KEYUP = 0x0002
+    KEYEVENTF_EXTENDEDKEY = 0x0001
+    for vk, scan, ext in (
+        (0x12, 0x38, False),  # VK_MENU (Alt)
+        (0xA4, 0x38, False),  # VK_LMENU
+        (0xA5, 0x38, True),   # VK_RMENU
+        (0x11, 0x1D, False),  # VK_CONTROL
+        (0xA2, 0x1D, False),  # VK_LCONTROL
+        (0xA3, 0x1D, True),   # VK_RCONTROL
+        (0x10, 0x2A, False),  # VK_SHIFT
+        (0xA0, 0x2A, False),  # VK_LSHIFT
+        (0xA1, 0x36, False),  # VK_RSHIFT
+        (0x5B, 0x5B, True),   # VK_LWIN
+        (0x5C, 0x5C, True),   # VK_RWIN
+    ):
+        try:
+            if (_user32.GetAsyncKeyState(vk) & 0x8000) or (_user32.GetKeyState(vk) & 0x8000):
+                flags = KEYEVENTF_KEYUP | (KEYEVENTF_EXTENDEDKEY if ext else 0)
+                _user32.keybd_event(vk, scan, flags, 0)
+        except Exception:
+            pass
 
 
 def validate_hotkey(hotkey: str) -> Optional[str]:
@@ -198,9 +280,8 @@ class HotkeyManager(QObject):
         self._clipboard_lock = threading.Lock()
         # Способы копирования в порядке надёжности (см. _run_capture_locked).
         self._copy_methods: Tuple[Tuple[str, Callable[[], None]], ...] = (
-            ("ctrl+insert", self._send_ctrl_insert),
-            ("vk ctrl+c", self._vk_ctrl_c),
-            ("scan ctrl+c", self._send_ctrl_c_scan),
+            ("win32 ctrl+c", self._send_ctrl_c_win32),
+            ("sendinput ctrl+c", self._send_ctrl_c_sendinput),
         )
 
     # ---------------------------------------------------------------- свойства
@@ -242,10 +323,15 @@ class HotkeyManager(QObject):
             print(f"[hotkey] Сочетание «{hotkey}» непонятно: {error}")
             return False
         try:
-            self._hotkey_ref = keyboard.add_hotkey(hotkey, self._on_hotkey_pressed)
-        except Exception as exc:  # сочетание занято другой программой и т.п.
-            print(f"[hotkey] Не удалось зарегистрировать хоткей «{hotkey}»: {exc}")
-            return False
+            self._hotkey_ref = keyboard.add_hotkey(
+                hotkey, self._on_hotkey_pressed, suppress=True
+            )
+        except Exception:
+            try:
+                self._hotkey_ref = keyboard.add_hotkey(hotkey, self._on_hotkey_pressed)
+            except Exception as exc:  # сочетание занято другой программой и т.п.
+                print(f"[hotkey] Не удалось зарегистрировать хоткей «{hotkey}»: {exc}")
+                return False
         self._current_hotkey = hotkey
         self._register_action_hotkeys()
         print(f"[hotkey] Готов: глобальный хоткей «{hotkey}» слушается.")
@@ -295,11 +381,18 @@ class HotkeyManager(QObject):
                 continue
             try:
                 ref = keyboard.add_hotkey(
-                    hk, lambda aid=action_id: self._on_action_hotkey_pressed(aid)
+                    hk, lambda aid=action_id: self._on_action_hotkey_pressed(aid),
+                    suppress=True,
                 )
                 self._action_hotkey_refs[action_id] = ref
-            except Exception as exc:
-                print(f"[hotkey] Не удалось зарегистрировать хоткей действия «{hk}»: {exc}")
+            except Exception:
+                try:
+                    ref = keyboard.add_hotkey(
+                        hk, lambda aid=action_id: self._on_action_hotkey_pressed(aid)
+                    )
+                    self._action_hotkey_refs[action_id] = ref
+                except Exception as exc:
+                    print(f"[hotkey] Не удалось зарегистрировать хоткей действия «{hk}»: {exc}")
 
     def _unregister_action_hotkeys(self) -> None:
         if keyboard is None:
@@ -435,21 +528,16 @@ class HotkeyManager(QObject):
             if delay_s:
                 time.sleep(delay_s)
 
-            for key in _MODIFIER_KEYS:
-                try:
-                    keyboard.release(key)
-                except Exception:
-                    pass
+            current_hk = self._current_hotkey or ""
+            if action_id and hasattr(self.config, "get_action_hotkeys"):
+                act_hks = self.config.get_action_hotkeys()
+                current_hk = act_hks.get(action_id, current_hk)
 
-            # 5) Цепочка способов копирования; между раундами — Esc (Alt от
-            #    хоткея мог открыть меню приложения). Всё ограничено общим
-            #    бюджетом времени.
+            _release_all_modifiers_win32(current_hk)
+
+            # 5) Цепочка способов копирования; всё ограничено общим бюджетом времени.
             for round_no in range(1, rounds + 1):
                 if round_no > 1:
-                    try:
-                        keyboard.send("esc")
-                    except Exception:
-                        pass
                     time.sleep(0.05)
                 for name, send_copy in self._copy_methods:
                     remaining = deadline - time.monotonic()
@@ -552,33 +640,79 @@ class HotkeyManager(QObject):
         return self._wait_for_any_text(timeout=timeout)
 
     @staticmethod
-    def _send_ctrl_insert() -> None:
-        """Ctrl+Insert — самый безопасный способ (терминалы, «занятый» Ctrl+C)."""
-        if keyboard is not None:
-            keyboard.send("ctrl+insert")
-
-    @staticmethod
-    def _send_ctrl_c_scan() -> None:
-        """Ctrl+C через scan-коды — для окружений, игнорирующих vk-инъекцию."""
-        if keyboard is not None:
-            keyboard.send("ctrl+c")
-
-    @staticmethod
-    def _vk_ctrl_c() -> None:
-        """Ctrl+C через keybd_event с ВИРТУАЛЬНЫМИ кодами.
-
-        На нелатинских раскладках scan-code инъекция Ctrl+C может не
-        распознаваться приложениями как копирование (диагностика это
-        показала), а vk-инъекция работает стабильно.
-        """
-        if sys.platform != "win32":
+    def _send_ctrl_c_win32() -> None:
+        """Ctrl+C через keybd_event с точными аппаратными scan-кодами и микро-паузами."""
+        if sys.platform != "win32" or _user32 is None:
             return
-        user32 = ctypes.windll.user32
-        VK_CONTROL, VK_C, KEYEVENTF_KEYUP = 0x11, 0x43, 0x0002
-        user32.keybd_event(VK_CONTROL, 0, 0, 0)
-        user32.keybd_event(VK_C, 0, 0, 0)
-        user32.keybd_event(VK_C, 0, KEYEVENTF_KEYUP, 0)
-        user32.keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, 0)
+        VK_CONTROL, VK_C = 0x11, 0x43
+        SCAN_CTRL, SCAN_C = 0x1D, 0x2E
+        KEYEVENTF_KEYUP = 0x0002
+        _user32.keybd_event(VK_CONTROL, SCAN_CTRL, 0, 0)
+        time.sleep(0.015)
+        _user32.keybd_event(VK_C, SCAN_C, 0, 0)
+        time.sleep(0.025)
+        _user32.keybd_event(VK_C, SCAN_C, KEYEVENTF_KEYUP, 0)
+        time.sleep(0.015)
+        _user32.keybd_event(VK_CONTROL, SCAN_CTRL, KEYEVENTF_KEYUP, 0)
+
+    @staticmethod
+    def _send_ctrl_c_sendinput() -> None:
+        """Ctrl+C через SendInput с микро-паузами для современных UI-контейнеров."""
+        if sys.platform != "win32" or _user32 is None or _INPUT is None:
+            return
+        try:
+            KEYEVENTF_KEYUP = 0x0002
+            # 1. Ctrl down
+            inp_ctrl_down = (_INPUT * 1)()
+            inp_ctrl_down[0].type = 1
+            inp_ctrl_down[0].ki.wVk = 0x11
+            inp_ctrl_down[0].ki.wScan = 0x1D
+            _user32.SendInput(1, inp_ctrl_down, ctypes.sizeof(_INPUT))
+            time.sleep(0.015)
+
+            # 2. C down
+            inp_c_down = (_INPUT * 1)()
+            inp_c_down[0].type = 1
+            inp_c_down[0].ki.wVk = 0x43
+            inp_c_down[0].ki.wScan = 0x2E
+            _user32.SendInput(1, inp_c_down, ctypes.sizeof(_INPUT))
+            time.sleep(0.025)
+
+            # 3. C up
+            inp_c_up = (_INPUT * 1)()
+            inp_c_up[0].type = 1
+            inp_c_up[0].ki.wVk = 0x43
+            inp_c_up[0].ki.wScan = 0x2E
+            inp_c_up[0].ki.dwFlags = KEYEVENTF_KEYUP
+            _user32.SendInput(1, inp_c_up, ctypes.sizeof(_INPUT))
+            time.sleep(0.015)
+
+            # 4. Ctrl up
+            inp_ctrl_up = (_INPUT * 1)()
+            inp_ctrl_up[0].type = 1
+            inp_ctrl_up[0].ki.wVk = 0x11
+            inp_ctrl_up[0].ki.wScan = 0x1D
+            inp_ctrl_up[0].ki.dwFlags = KEYEVENTF_KEYUP
+            _user32.SendInput(1, inp_ctrl_up, ctypes.sizeof(_INPUT))
+        except Exception:
+            pass
+
+    @staticmethod
+    def _send_ctrl_insert_win32() -> None:
+        """Ctrl+Insert с аппаратным флагом EXTENDEDKEY (для консолей/терминалов)."""
+        if sys.platform != "win32" or _user32 is None:
+            return
+        VK_CONTROL, VK_INSERT = 0x11, 0x2D
+        SCAN_CTRL, SCAN_INSERT = 0x1D, 0x52
+        KEYEVENTF_KEYUP = 0x0002
+        KEYEVENTF_EXTENDEDKEY = 0x0001
+        _user32.keybd_event(VK_CONTROL, SCAN_CTRL, 0, 0)
+        time.sleep(0.015)
+        _user32.keybd_event(VK_INSERT, SCAN_INSERT, KEYEVENTF_EXTENDEDKEY, 0)
+        time.sleep(0.025)
+        _user32.keybd_event(VK_INSERT, SCAN_INSERT, KEYEVENTF_EXTENDEDKEY | KEYEVENTF_KEYUP, 0)
+        time.sleep(0.015)
+        _user32.keybd_event(VK_CONTROL, SCAN_CTRL, KEYEVENTF_KEYUP, 0)
 
     # ------------------------------------------------ «Заменить в тексте»
     def paste_to_window(self, text: str) -> None:
@@ -730,16 +864,19 @@ class HotkeyManager(QObject):
 
     @staticmethod
     def _vk_ctrl_v() -> None:
-        """Ctrl+V через keybd_event с ВИРТУАЛЬНЫМИ кодами — как и Ctrl+C:
-        scan-инъекция букв на нелатинских раскладках ненадёжна."""
-        if sys.platform != "win32":
+        """Ctrl+V через keybd_event с точными аппаратными scan-кодами и микро-паузами."""
+        if sys.platform != "win32" or _user32 is None:
             return
-        user32 = ctypes.windll.user32
-        VK_CONTROL, VK_V, KEYEVENTF_KEYUP = 0x11, 0x56, 0x0002
-        user32.keybd_event(VK_CONTROL, 0, 0, 0)
-        user32.keybd_event(VK_V, 0, 0, 0)
-        user32.keybd_event(VK_V, 0, KEYEVENTF_KEYUP, 0)
-        user32.keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, 0)
+        VK_CONTROL, VK_V = 0x11, 0x56
+        SCAN_CTRL, SCAN_V = 0x1D, 0x2F
+        KEYEVENTF_KEYUP = 0x0002
+        _user32.keybd_event(VK_CONTROL, SCAN_CTRL, 0, 0)
+        time.sleep(0.015)
+        _user32.keybd_event(VK_V, SCAN_V, 0, 0)
+        time.sleep(0.025)
+        _user32.keybd_event(VK_V, SCAN_V, KEYEVENTF_KEYUP, 0)
+        time.sleep(0.015)
+        _user32.keybd_event(VK_CONTROL, SCAN_CTRL, KEYEVENTF_KEYUP, 0)
 
     # ------------------------------------------------------------------- буфер
     @staticmethod

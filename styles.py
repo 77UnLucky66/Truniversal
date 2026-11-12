@@ -1,41 +1,193 @@
 """
-styles.py — тёмная минималистичная тема приложения (QSS).
-
-Единый стиль для всех окон и меню. Палитра вынесена в константы: на
-следующих шагах окна настроек и мини-окно будут использовать те же цвета,
-чтобы интерфейс оставался согласованным. Здесь же — вспомогательная
-функция тёмного заголовка окна (Windows 10/11, через DWM API).
+styles.py — тёмная и светлая минималистичные темы приложения (QSS),
+поддержка масштабирования шрифтов, определение системной темы Windows (Этап 9).
 """
 
 from __future__ import annotations
 
+import re
 import sys
+from typing import Dict, Any, Optional
+from PyQt6.QtWidgets import QApplication, QWidget
 
-from PyQt6.QtWidgets import QWidget
+# --- Палитра: Тёмная тема (Dark) -------------------------------------------
+DARK_PALETTE: Dict[str, str] = {
+    "BG_WINDOW": "#13151A",
+    "BG_SURFACE": "#171A21",
+    "BG_CARD": "#1D212A",
+    "BG_CARD_HOVER": "#222732",
+    "BG_SURFACE_ALT": "#111317",
+    "BORDER": "#2A303D",
+    "BORDER_LIGHT": "#384152",
+    "BORDER_INPUT": "#2E3444",
+    "ACCENT": "#5B6CFF",
+    "ACCENT_HOVER": "#7382FF",
+    "ACCENT_PRESSED": "#4B59D9",
+    "TEXT_PRIMARY": "#F0F2F7",
+    "TEXT_SECONDARY": "#8F97A9",
+    "TEXT_MUTED": "#6B7285",
+    "DANGER": "#E5484D",
+    "DANGER_HOVER": "#FF6368",
+    "DANGER_PRESSED": "#C23A3F",
+    "SUCCESS": "#3FB970",
+    "SUCCESS_HOVER": "#49CE7F",
+    "WARNING": "#F5A623",
+    "SPLITTER_HANDLE": "#333A4D",
+    "TABLE_BG": "#12151E",
+    "TABLE_HEADER_BG": "#161922",
+    "PROJECT_BAR_BG": "#141720",
+    "CARD_BG": "#181B23",
+    "CARD_BORDER": "#262B38",
+    "INLINE_BAR_BG": "#151820",
+    "SOURCE_BG": "#13151C",
+    "SOURCE_TEXT": "#8F97A9",
+    "RESULT_TEXT": "#F0F2F7",
+    "STATUS_IDLE_BG": "#222735",
+    "STATUS_IDLE_TEXT": "#8F97A9",
+    "STATUS_PROGRESS_BG": "#1E254A",
+    "STATUS_PROGRESS_TEXT": "#93C5FD",
+    "STATUS_DONE_BG": "#14281E",
+    "STATUS_DONE_TEXT": "#86EFAC",
+    "STATUS_ERROR_BG": "#3A1F23",
+    "STATUS_ERROR_TEXT": "#FFA198",
+    "STATUS_CANCEL_BG": "#2C2224",
+    "STATUS_CANCEL_TEXT": "#E5A0A4",
+    "BTN_BG": "#202430",
+    "BTN_TEXT": "#DDE2ED",
+    "BTN_BORDER": "#333948",
+    "BTN_HOVER_BG": "#272C3B",
+    "BTN_HOVER_TEXT": "#FFFFFF",
+    "BTN_PRESSED_BG": "#1B1E26",
+    "BTN_DISABLED_BG": "#16181E",
+    "BTN_DISABLED_BORDER": "#232731",
+    "INPUT_DISABLED_BG": "#16181E",
+    "INPUT_DISABLED_BORDER": "#232731",
+}
 
-# --- Палитра (тёмная премиальная тема) ---------------------------------------
-BG_WINDOW = "#13151A"       # глубокий фон окна (deep slate)
-BG_SURFACE = "#171A21"      # поверхность полотна вкладок и панелей
-BG_CARD = "#1D212A"         # фон контейнеров / карточек настроек
-BG_CARD_HOVER = "#222732"   # карточка при наведении
-BG_SURFACE_ALT = "#111317"  # фон полей ввода (recessed dark box)
-BORDER = "#2A303D"          # граница карточек и разделителей
-BORDER_LIGHT = "#384152"    # более светлая рамка при наведении
-BORDER_INPUT = "#2E3444"    # граница полей ввода
-ACCENT = "#5B6CFF"          # основной современный акцент (индиго-электрик)
-ACCENT_HOVER = "#7382FF"   # яркий акцент при наведении
-ACCENT_PRESSED = "#4B59D9"  # акцент при нажатии
-TEXT_PRIMARY = "#F0F2F7"    # четкий высококонтрастный текст
-TEXT_SECONDARY = "#8F97A9"  # аккуратный вторичный текст
-TEXT_MUTED = "#6B7285"      # приглушённый неактивный текст
-DANGER = "#E5484D"          # опасные действия
-DANGER_HOVER = "#FF6368"    # опасные действия при наведении
-DANGER_PRESSED = "#C23A3F"  # опасные действия в нажатом состоянии
-SUCCESS = "#3FB970"         # подтверждение («Скопировано ✓»)
-SUCCESS_HOVER = "#49CE7F"   # подтверждение при наведении
-WARNING = "#F5A623"         # предупреждения
+# --- Палитра: Светлая тема (Light) -----------------------------------------
+LIGHT_PALETTE: Dict[str, str] = {
+    "BG_WINDOW": "#F2F5F9",
+    "BG_SURFACE": "#FFFFFF",
+    "BG_CARD": "#FFFFFF",
+    "BG_CARD_HOVER": "#F8FAFD",
+    "BG_SURFACE_ALT": "#F0F3F8",
+    "BORDER": "#D6DCE5",
+    "BORDER_LIGHT": "#C2CAD6",
+    "BORDER_INPUT": "#CCD4E2",
+    "ACCENT": "#4353FF",
+    "ACCENT_HOVER": "#5B6CFF",
+    "ACCENT_PRESSED": "#3342E6",
+    "TEXT_PRIMARY": "#181D26",
+    "TEXT_SECONDARY": "#475569",
+    "TEXT_MUTED": "#64748B",
+    "DANGER": "#DC3545",
+    "DANGER_HOVER": "#E84A59",
+    "DANGER_PRESSED": "#B02A37",
+    "SUCCESS": "#198754",
+    "SUCCESS_HOVER": "#20A566",
+    "WARNING": "#D97706",
+    "SPLITTER_HANDLE": "#C4CBD6",
+    "TABLE_BG": "#FFFFFF",
+    "TABLE_HEADER_BG": "#EDF2F7",
+    "PROJECT_BAR_BG": "#F4F7FB",
+    "CARD_BG": "#FFFFFF",
+    "CARD_BORDER": "#D6DCE5",
+    "INLINE_BAR_BG": "#F4F7FB",
+    "SOURCE_BG": "#F1F5F9",
+    "SOURCE_TEXT": "#334155",
+    "RESULT_TEXT": "#0F172A",
+    "STATUS_IDLE_BG": "#E2E8F0",
+    "STATUS_IDLE_TEXT": "#475569",
+    "STATUS_PROGRESS_BG": "#DBEAFE",
+    "STATUS_PROGRESS_TEXT": "#1D4ED8",
+    "STATUS_DONE_BG": "#DCFCE7",
+    "STATUS_DONE_TEXT": "#166534",
+    "STATUS_ERROR_BG": "#FEE2E2",
+    "STATUS_ERROR_TEXT": "#B91C1C",
+    "STATUS_CANCEL_BG": "#F1F5F9",
+    "STATUS_CANCEL_TEXT": "#64748B",
+    "BTN_BG": "#F1F5F9",
+    "BTN_TEXT": "#1E293B",
+    "BTN_BORDER": "#CBD5E1",
+    "BTN_HOVER_BG": "#E2E8F0",
+    "BTN_HOVER_TEXT": "#0F172A",
+    "BTN_PRESSED_BG": "#CBD5E1",
+    "BTN_DISABLED_BG": "#F8FAFC",
+    "BTN_DISABLED_BORDER": "#E2E8F0",
+    "INPUT_DISABLED_BG": "#F1F5F9",
+    "INPUT_DISABLED_BORDER": "#E2E8F0",
+}
 
-APP_QSS = f"""
+# Обратная совместимость с кодом, импортирующим константы напрямую
+BG_WINDOW = DARK_PALETTE["BG_WINDOW"]
+BG_SURFACE = DARK_PALETTE["BG_SURFACE"]
+BG_CARD = DARK_PALETTE["BG_CARD"]
+BG_CARD_HOVER = DARK_PALETTE["BG_CARD_HOVER"]
+BG_SURFACE_ALT = DARK_PALETTE["BG_SURFACE_ALT"]
+BORDER = DARK_PALETTE["BORDER"]
+BORDER_LIGHT = DARK_PALETTE["BORDER_LIGHT"]
+BORDER_INPUT = DARK_PALETTE["BORDER_INPUT"]
+ACCENT = DARK_PALETTE["ACCENT"]
+ACCENT_HOVER = DARK_PALETTE["ACCENT_HOVER"]
+ACCENT_PRESSED = DARK_PALETTE["ACCENT_PRESSED"]
+TEXT_PRIMARY = DARK_PALETTE["TEXT_PRIMARY"]
+TEXT_SECONDARY = DARK_PALETTE["TEXT_SECONDARY"]
+TEXT_MUTED = DARK_PALETTE["TEXT_MUTED"]
+DANGER = DARK_PALETTE["DANGER"]
+DANGER_HOVER = DARK_PALETTE["DANGER_HOVER"]
+DANGER_PRESSED = DARK_PALETTE["DANGER_PRESSED"]
+SUCCESS = DARK_PALETTE["SUCCESS"]
+SUCCESS_HOVER = DARK_PALETTE["SUCCESS_HOVER"]
+WARNING = DARK_PALETTE["WARNING"]
+
+
+def detect_system_theme() -> str:
+    """Определяет системную тему Windows (dark / light)."""
+    if sys.platform == "win32":
+        try:
+            import winreg
+            key = winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER,
+                r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"
+            )
+            val, _ = winreg.QueryValueEx(key, "AppsUseLightTheme")
+            winreg.CloseKey(key)
+            return "light" if val == 1 else "dark"
+        except Exception:
+            pass
+    return "dark"
+
+
+def get_theme_palette(theme: str = "dark") -> Dict[str, str]:
+    """Возвращает палитру для темы: dark, light или system."""
+    t = theme.lower().strip()
+    if t == "system":
+        t = detect_system_theme()
+    return LIGHT_PALETTE if t == "light" else DARK_PALETTE
+
+
+def scale_font_sizes(qss: str, font_size: str = "medium") -> str:
+    """Масштабирует размеры шрифтов в QSS: small (-1pt), medium (0), large (+1.5pt)."""
+    delta = 0.0
+    fs = (font_size or "medium").lower().strip()
+    if fs == "small":
+        delta = -1.0
+    elif fs == "large":
+        delta = 1.5
+
+    if abs(delta) < 0.01:
+        return qss
+
+    def _replace_pt(match):
+        val = float(match.group(1))
+        new_val = max(7.0, val + delta)
+        s = f"{new_val:.1f}".rstrip("0").rstrip(".")
+        return f"font-size: {s}pt"
+
+    return re.sub(r"font-size:\s*([0-9\.]+)pt", _replace_pt, qss)
+
+
+_QSS_RAW_TEMPLATE = """
 /* ============================================================
    Truniversal — тёмная минималистичная тема (QSS)
    ============================================================ */
@@ -105,9 +257,9 @@ QToolTip {{
 
 /* --- Кнопки (базовые стили) ------------------------------------------ */
 QPushButton {{
-    background-color: #242834;
-    color: #DDE2ED;
-    border: 1px solid #363D4E;
+    background-color: {BTN_BG};
+    color: {BTN_TEXT};
+    border: 1px solid {BTN_BORDER};
     border-radius: 8px;
     padding: 7px 16px;
     font-weight: 600;
@@ -115,20 +267,61 @@ QPushButton {{
 }}
 
 QPushButton:hover {{
-    background-color: #2D3344;
-    color: #FFFFFF;
+    background-color: {BTN_HOVER_BG};
+    color: {BTN_HOVER_TEXT};
     border-color: {ACCENT};
 }}
 
 QPushButton:pressed {{
-    background-color: #1F232D;
+    background-color: {BTN_PRESSED_BG};
     border-color: {ACCENT_PRESSED};
 }}
 
 QPushButton:disabled {{
-    background-color: #1B1E26;
-    border-color: #262A34;
+    background-color: {BTN_DISABLED_BG};
+    border-color: {BTN_DISABLED_BORDER};
     color: {TEXT_MUTED};
+}}
+
+/* Вторичная кнопка */
+QPushButton#SecondaryButton {{
+    background-color: {BTN_BG};
+    color: {TEXT_PRIMARY};
+    border: 1px solid {BTN_BORDER};
+    border-radius: 8px;
+    padding: 7px 16px;
+    font-weight: 600;
+    font-size: 9.5pt;
+}}
+
+QPushButton#SecondaryButton:hover {{
+    background-color: {BTN_HOVER_BG};
+    color: {TEXT_PRIMARY};
+    border-color: {ACCENT};
+}}
+
+QPushButton#SecondaryButton:pressed {{
+    background-color: {BTN_PRESSED_BG};
+    border-color: {ACCENT_PRESSED};
+}}
+
+/* Кнопки действий проекта (+ Создать, Копия, Удалить) */
+QPushButton#ProjectActionBtn {{
+    background-color: {BTN_BG};
+    color: {BTN_TEXT};
+    border: 1px solid {BTN_BORDER};
+    border-radius: 7px;
+    padding: 4px 6px;
+    font-size: 8.5pt;
+    font-weight: 600;
+}}
+QPushButton#ProjectActionBtn:hover {{
+    background-color: {BTN_HOVER_BG};
+    color: {BTN_HOVER_TEXT};
+    border-color: {ACCENT};
+}}
+QPushButton#ProjectActionBtn:pressed {{
+    background-color: {BTN_PRESSED_BG};
 }}
 
 /* Главная кнопка действия (Сохранить, Подтвердить) */
@@ -155,9 +348,9 @@ QPushButton#PrimaryButton:pressed {{
 }}
 
 QPushButton#PrimaryButton:disabled {{
-    background-color: #2D3350;
-    border-color: #353B55;
-    color: #7B84A0;
+    background-color: {BTN_DISABLED_BG};
+    border-color: {BTN_DISABLED_BORDER};
+    color: {TEXT_MUTED};
 }}
 
 /* --- Скроллбары (для «ленты» карточек в мини-окне) -------------------- */
@@ -206,7 +399,9 @@ QPushButton#ModeButtonAi {{
     color: #FFFFFF;
     border: 1px solid #6E7EFF;
     border-radius: 7px;
-    padding: 6px 14px;
+    padding: 4px 11px;
+    min-height: 28px;
+    font-size: 9pt;
     font-weight: 600;
 }}
 QPushButton#ModeButtonAi:hover {{
@@ -216,30 +411,35 @@ QPushButton#ModeButtonAi:hover {{
 }}
 
 QPushButton#ModeButtonStd {{
-    background-color: #202430;
+    background-color: {BTN_BG};
     color: {TEXT_SECONDARY};
     border: 1px solid {BORDER};
     border-radius: 7px;
-    padding: 5px 13px;
+    padding: 4px 11px;
+    min-height: 28px;
+    font-size: 9pt;
     font-weight: 600;
 }}
 QPushButton#ModeButtonStd:hover {{
-    background-color: #272C3B;
-    color: #FFFFFF;
+    background-color: {BTN_HOVER_BG};
+    color: {TEXT_PRIMARY};
     border-color: {ACCENT};
 }}
 
-/* Кнопка «Очистить историю» */
+/* Кнопка «Очистить» в мини-окне */
 QPushButton#ClearButton {{
-    background-color: #202430;
+    background-color: {BTN_BG};
     color: {TEXT_SECONDARY};
     border: 1px solid {BORDER};
     border-radius: 7px;
-    padding: 6px 12px;
+    padding: 4px 11px;
+    min-height: 28px;
+    font-size: 9pt;
+    font-weight: 600;
 }}
 QPushButton#ClearButton:hover {{
-    background-color: #2D2124;
-    color: #FF7075;
+    background-color: {DANGER};
+    color: #FFFFFF;
     border-color: {DANGER};
 }}
 
@@ -265,21 +465,21 @@ QPushButton#DangerButton:pressed {{
 
 /* Кнопки быстрого заполнения и вспомогательные действия */
 QPushButton#GhostButton {{
-    background-color: #1F222B;
-    color: #BAC2D4;
-    border: 1px solid #323847;
+    background-color: {BTN_BG};
+    color: {TEXT_PRIMARY};
+    border: 1px solid {BORDER};
     border-radius: 7px;
     padding: 5px 12px;
     font-size: 9pt;
     font-weight: 500;
 }}
 QPushButton#GhostButton:hover {{
-    background-color: #292E3C;
-    color: #FFFFFF;
+    background-color: {BTN_HOVER_BG};
+    color: {TEXT_PRIMARY};
     border-color: {ACCENT};
 }}
 QPushButton#GhostButton:pressed {{
-    background-color: #191B22;
+    background-color: {BTN_PRESSED_BG};
     border-color: {ACCENT_PRESSED};
 }}
 
@@ -293,15 +493,15 @@ QComboBox {{
     min-height: 22px;
 }}
 QComboBox:hover {{
-    border-color: #3F475A;
+    border-color: {ACCENT};
 }}
 QComboBox:focus {{
     border: 1.5px solid {ACCENT};
 }}
 QComboBox:disabled {{
-    background-color: #16181E;
+    background-color: {INPUT_DISABLED_BG};
     color: {TEXT_MUTED};
-    border-color: #232731;
+    border-color: {INPUT_DISABLED_BORDER};
 }}
 QComboBox::drop-down {{
     border: none;
@@ -339,7 +539,7 @@ QLabel#CardResultLabel {{
     font-size: 11pt;
 }}
 
-/* Ошибка перевода прямо в карточке (⚠ …) */
+/* Ошибка перевода прямо в карточке */
 QLabel#CardErrorLabel {{
     color: {DANGER};
     font-size: 10pt;
@@ -365,45 +565,44 @@ QLabel#CardEditedBadge {{
 
 /* Кнопка отмены активного запроса (Этап 6.6) */
 QPushButton#CancelLoadingBtn {{
-    background-color: #2D1A1E;
-    color: #FFA198;
-    border: 1px solid #5A2A32;
+    background-color: rgba(229, 72, 77, 0.15);
+    color: {DANGER};
+    border: 1px solid {DANGER};
     border-radius: 7px;
     padding: 5px 12px;
     font-size: 9pt;
     font-weight: 600;
 }}
 QPushButton#CancelLoadingBtn:hover {{
-    background-color: #402026;
-    border-color: #F85149;
+    background-color: {DANGER};
     color: #FFFFFF;
 }}
 
 /* Кнопка «Сравнить» / Diff (Этап 6.3) */
 QPushButton#DiffToggleBtn {{
-    background-color: #1A1D24;
-    color: #BAC2D4;
-    border: 1px solid #2F3647;
+    background-color: {BTN_BG};
+    color: {TEXT_PRIMARY};
+    border: 1px solid {BORDER};
     border-radius: 7px;
     padding: 5px 10px;
     font-size: 8.5pt;
     font-weight: 600;
 }}
 QPushButton#DiffToggleBtn:hover {{
-    background-color: #242938;
-    color: #FFFFFF;
+    background-color: {BTN_HOVER_BG};
+    color: {TEXT_PRIMARY};
     border-color: {ACCENT};
 }}
 QPushButton#DiffToggleBtn[active="true"] {{
-    background-color: #22294A;
-    color: #9AA6FF;
+    background-color: {ACCENT};
+    color: #FFFFFF;
     border-color: {ACCENT};
 }}
 
 /* Кнопки в карточке: удалить, редактировать исходник, меню «⋯» (Этап 6.4) */
 QPushButton#CardSmallIconBtn, QPushButton#MoreMenuBtn {{
     background-color: transparent;
-    color: #8B949E;
+    color: {TEXT_MUTED};
     border: 1px solid transparent;
     border-radius: 5px;
     padding: 2px 7px;
@@ -411,14 +610,14 @@ QPushButton#CardSmallIconBtn, QPushButton#MoreMenuBtn {{
     font-weight: 600;
 }}
 QPushButton#CardSmallIconBtn:hover, QPushButton#MoreMenuBtn:hover {{
-    background-color: #242938;
-    color: #FFFFFF;
-    border-color: #384152;
+    background-color: {BG_CARD_HOVER};
+    color: {TEXT_PRIMARY};
+    border-color: {BORDER};
 }}
 
 QPushButton#DeleteCardBtn {{
     background-color: transparent;
-    color: #8B949E;
+    color: {TEXT_MUTED};
     border: 1px solid transparent;
     border-radius: 5px;
     padding: 2px 6px;
@@ -426,46 +625,46 @@ QPushButton#DeleteCardBtn {{
     font-weight: 700;
 }}
 QPushButton#DeleteCardBtn:hover {{
-    background-color: #3A1F23;
-    color: #FFA198;
-    border-color: #F85149;
+    background-color: {DANGER};
+    color: #FFFFFF;
+    border-color: {DANGER};
 }}
 
 /* Блок сравнения оригинала и результата (Этап 6.3) */
 QFrame#ComparisonPanel {{
-    background-color: #12141A;
-    border: 1px solid #2A303F;
+    background-color: {BG_SURFACE_ALT};
+    border: 1px solid {BORDER};
     border-radius: 9px;
 }}
 QLabel#DiffColHeader {{
-    color: #9AA6FF;
+    color: {ACCENT};
     font-size: 8.5pt;
     font-weight: 700;
 }}
 QLabel#DiffTextBox {{
-    background-color: #181B23;
-    color: #C9D1D9;
-    border: 1px solid #262B38;
+    background-color: {CARD_BG};
+    color: {TEXT_PRIMARY};
+    border: 1px solid {CARD_BORDER};
     border-radius: 6px;
     padding: 8px;
     font-size: 9.5pt;
 }}
 QLabel#DiffSectionHeader {{
-    color: #BAC2D4;
+    color: {TEXT_PRIMARY};
     font-size: 8.5pt;
     font-weight: 700;
 }}
 QLabel#DiffStatsBadge {{
     background-color: rgba(94, 106, 210, 0.15);
-    color: #9AA6FF;
+    color: {ACCENT};
     border-radius: 4px;
     padding: 1px 6px;
     font-size: 8pt;
     font-weight: 600;
 }}
 QLabel#DiffHtmlView {{
-    background-color: #181B23;
-    border: 1px solid #262B38;
+    background-color: {CARD_BG};
+    border: 1px solid {CARD_BORDER};
     border-radius: 6px;
     padding: 10px;
     font-size: 10pt;
@@ -474,15 +673,15 @@ QLabel#DiffHtmlView {{
 
 /* Блоки отдельных вариантов (Этап 6.2) */
 QFrame#VariantBlock {{
-    background-color: #141720;
-    border: 1px solid #282E3E;
+    background-color: {PROJECT_BAR_BG};
+    border: 1px solid {BORDER};
     border-radius: 8px;
 }}
 QFrame#VariantBlock:hover {{
-    border-color: #3B445A;
+    border-color: {ACCENT};
 }}
 QLabel#VariantTitle {{
-    color: #9AA6FF;
+    color: {ACCENT};
     font-size: 9pt;
     font-weight: 700;
 }}
@@ -492,41 +691,42 @@ QLabel#VariantText {{
     line-height: 1.35;
 }}
 QPushButton#VariantActionBtn {{
-    background-color: #1E232E;
-    color: #BAC2D4;
-    border: 1px solid #2E3646;
+    background-color: {BTN_BG};
+    color: {TEXT_PRIMARY};
+    border: 1px solid {BORDER};
     border-radius: 5px;
     padding: 3px 9px;
     font-size: 8pt;
     font-weight: 600;
 }}
 QPushButton#VariantActionBtn:hover {{
-    background-color: #293040;
-    color: #FFFFFF;
+    background-color: {BTN_HOVER_BG};
+    color: {TEXT_PRIMARY};
     border-color: {ACCENT};
 }}
 
 /* Встроенные панели редактирования (Этап 6.1 и 6.4) */
 QFrame#InlineEditorBar {{
-    background-color: #13161D;
-    border: 1px solid #2C3342;
+    background-color: {INLINE_BAR_BG};
+    border: 1px solid {BORDER};
     border-radius: 8px;
 }}
 QTextEdit#InlineTextEdit, QLineEdit#InlineLineEdit {{
-    background-color: #1A1D26;
+    background-color: {BG_SURFACE_ALT};
     color: {TEXT_PRIMARY};
-    border: 1px solid #333C4E;
+    border: 1px solid {BORDER_INPUT};
     border-radius: 6px;
     padding: 6px 8px;
     font-size: 9.5pt;
 }}
 QTextEdit#InlineTextEdit:focus, QLineEdit#InlineLineEdit:focus {{
     border: 1.5px solid {ACCENT};
+    background-color: {BG_SURFACE};
 }}
 
-/* Кнопка «Скопировать» и её состояние «Скопировано ✓» */
+/* Кнопка «Скопировать» и её состояние «Скопировано» */
 QPushButton#CopyButton {{
-    background-color: #202430;
+    background-color: {BTN_BG};
     color: {TEXT_PRIMARY};
     border: 1px solid {BORDER};
     border-radius: 7px;
@@ -535,9 +735,9 @@ QPushButton#CopyButton {{
     font-weight: 600;
 }}
 QPushButton#CopyButton:hover {{
-    background-color: #272C3B;
+    background-color: {BTN_HOVER_BG};
     border-color: {ACCENT};
-    color: #FFFFFF;
+    color: {BTN_HOVER_TEXT};
 }}
 
 QPushButton#CopyButtonDone {{
@@ -557,7 +757,7 @@ QPushButton#CopyButtonDone:hover {{
 
 /* Кнопка «Повторить» на карточке */
 QPushButton#RegenerateButton {{
-    background-color: #202430;
+    background-color: {BTN_BG};
     color: {TEXT_PRIMARY};
     border: 1px solid {BORDER};
     border-radius: 7px;
@@ -566,21 +766,21 @@ QPushButton#RegenerateButton {{
     font-weight: 600;
 }}
 QPushButton#RegenerateButton:hover {{
-    background-color: #272C3B;
+    background-color: {BTN_HOVER_BG};
     border-color: {ACCENT};
-    color: #FFFFFF;
+    color: {BTN_HOVER_TEXT};
 }}
 QPushButton#RegenerateButton:disabled {{
-    background-color: #16181E;
+    background-color: {BTN_DISABLED_BG};
     color: {TEXT_MUTED};
-    border-color: #232731;
+    border-color: {BTN_DISABLED_BORDER};
 }}
 
 /* Бейдж направления перевода на карточке (EN → RU) (Этап 4) */
 QPushButton#DirectionBadge {{
-    background-color: #1A1D24;
-    color: #7987FF;
-    border: 1px solid #2F3647;
+    background-color: {BG_SURFACE_ALT};
+    color: {ACCENT};
+    border: 1px solid {BORDER};
     border-radius: 6px;
     padding: 4px 9px;
     font-size: 8.5pt;
@@ -588,15 +788,15 @@ QPushButton#DirectionBadge {{
     letter-spacing: 0.5px;
 }}
 QPushButton#DirectionBadge:hover {{
-    background-color: #242938;
-    color: #9AA6FF;
+    background-color: {BG_CARD_HOVER};
+    color: {ACCENT_HOVER};
     border-color: {ACCENT};
 }}
 
 /* Бейдж применённого действия на карточке (Этап 5) */
 QLabel#CardActionBadge {{
     background-color: rgba(94, 106, 210, 0.15);
-    color: #9AA6FF;
+    color: {ACCENT};
     border: 1px solid rgba(94, 106, 210, 0.35);
     border-radius: 5px;
     padding: 2px 7px;
@@ -607,125 +807,128 @@ QLabel#CardActionBadge {{
 
 /* Кнопка выбора действия на карточке (Этап 5) */
 QPushButton#CardActionBtn {{
-    background-color: #1A1D24;
-    color: #BAC2D4;
-    border: 1px solid #2F3647;
+    background-color: {BTN_BG};
+    color: {TEXT_PRIMARY};
+    border: 1px solid {BORDER};
     border-radius: 6px;
     padding: 4px 10px;
     font-size: 8.5pt;
     font-weight: 600;
 }}
 QPushButton#CardActionBtn:hover {{
-    background-color: #242938;
-    color: #FFFFFF;
+    background-color: {BTN_HOVER_BG};
+    color: {BTN_HOVER_TEXT};
     border-color: {ACCENT};
 }}
 
 /* Кнопка меню действий в заголовке мини-окна (Этап 5) */
 QPushButton#QuickActionsMenuBtn {{
-    background-color: #202430;
-    color: #BAC2D4;
-    border: 1px solid #333948;
+    background-color: {BTN_BG};
+    color: {TEXT_PRIMARY};
+    border: 1px solid {BORDER};
     border-radius: 7px;
-    padding: 6px 12px;
+    padding: 4px 11px;
+    min-height: 28px;
     font-size: 9pt;
     font-weight: 600;
 }}
 QPushButton#QuickActionsMenuBtn:hover {{
-    background-color: #292E3C;
-    color: #FFFFFF;
+    background-color: {BTN_HOVER_BG};
+    color: {BTN_HOVER_TEXT};
     border-color: {ACCENT};
 }}
 
 /* Кнопка добавления своего запроса */
 QPushButton#CustomPromptToggleBtn {{
-    background-color: #202430;
-    color: #BAC2D4;
-    border: 1px solid #333948;
+    background-color: {BTN_BG};
+    color: {TEXT_PRIMARY};
+    border: 1px solid {BORDER};
     border-radius: 7px;
-    padding: 6px 11px;
-    font-size: 8.5pt;
+    padding: 4px 11px;
+    min-height: 28px;
+    font-size: 9pt;
     font-weight: 600;
 }}
 QPushButton#CustomPromptToggleBtn:hover {{
-    background-color: #292E3C;
-    color: #FFFFFF;
+    background-color: {BTN_HOVER_BG};
+    color: {BTN_HOVER_TEXT};
     border-color: {ACCENT};
 }}
 
 /* Подпанель ввода произвольного промпта */
 QFrame#CustomPromptBar {{
-    background-color: #171920;
-    border-bottom: 1px solid #2B303E;
+    background-color: {PROJECT_BAR_BG};
+    border-bottom: 1px solid {BORDER};
 }}
 
 QLineEdit#CustomPromptEdit {{
-    background-color: #1F232D;
+    background-color: {BG_SURFACE_ALT};
     color: {TEXT_PRIMARY};
-    border: 1px solid #363D4E;
+    border: 1px solid {BORDER_INPUT};
     border-radius: 6px;
     padding: 5px 9px;
     font-size: 9pt;
 }}
 QLineEdit#CustomPromptEdit:focus {{
     border: 1.5px solid {ACCENT};
+    background-color: {BG_SURFACE};
 }}
 
 QPushButton#CloseSubBarBtn {{
     background-color: transparent;
-    color: #7B84A0;
+    color: {TEXT_MUTED};
     border: none;
     font-size: 11pt;
     padding: 2px 8px;
 }}
 QPushButton#CloseSubBarBtn:hover {{
-    color: #FF7075;
+    color: {DANGER};
 }}
 
 /* Панель быстрых действий (Pills) */
 QFrame#PinnedActionsBar {{
-    background-color: #15171D;
-    border-bottom: 1px solid #262A36;
+    background-color: {PROJECT_BAR_BG};
+    border-bottom: 1px solid {BORDER};
 }}
 
 QLabel#PinnedBarLabel {{
-    color: #70788D;
+    color: {TEXT_MUTED};
     font-size: 8pt;
     font-weight: 600;
     padding-right: 4px;
 }}
 
 QPushButton#QuickActionPill {{
-    background-color: #1E222C;
-    color: #BAC2D4;
-    border: 1px solid #2D3342;
+    background-color: {BTN_BG};
+    color: {TEXT_PRIMARY};
+    border: 1px solid {BORDER};
     border-radius: 12px;
     padding: 3px 10px;
     font-size: 8pt;
     font-weight: 600;
 }}
 QPushButton#QuickActionPill:hover {{
-    background-color: #272C39;
-    color: #FFFFFF;
+    background-color: {BTN_HOVER_BG};
+    color: {BTN_HOVER_TEXT};
     border-color: {ACCENT};
 }}
 QPushButton#QuickActionPill:pressed {{
-    background-color: #191B22;
+    background-color: {BTN_PRESSED_BG};
 }}
 
 /* Кнопка смены направления ⇄ (Этап 4) */
 QPushButton#DirectionSwapBtn {{
-    background-color: #1A1D24;
-    color: #8F97A9;
-    border: 1px solid #2F3647;
+    background-color: {BTN_BG};
+    color: {TEXT_SECONDARY};
+    border: 1px solid {BORDER};
     border-radius: 6px;
     padding: 4px 8px;
     font-size: 9.5pt;
     font-weight: 700;
 }}
 QPushButton#DirectionSwapBtn:hover {{
-    background-color: #242938;
-    color: #FFFFFF;
+    background-color: {BTN_HOVER_BG};
+    color: {TEXT_PRIMARY};
     border-color: {ACCENT};
 }}
 
@@ -745,9 +948,9 @@ QPushButton#ReplaceButton:hover {{
     color: #FFFFFF;
 }}
 QPushButton#ReplaceButton:disabled {{
-    background-color: #2D3350;
-    border-color: #353B55;
-    color: #7B84A0;
+    background-color: {BTN_DISABLED_BG};
+    border-color: {BTN_DISABLED_BORDER};
+    color: {TEXT_MUTED};
 }}
 
 /* Пустое состояние мини-окна */
@@ -763,7 +966,7 @@ QLabel#EmptyStateLabel {{
 
 /* Вкладки */
 QTabWidget, QStackedWidget {{
-    background-color: {BG_SURFACE};
+    background-color: {BG_WINDOW};
 }}
 
 QTabWidget::pane {{
@@ -776,9 +979,10 @@ QTabWidget::pane {{
 QTabBar::tab {{
     background: transparent;
     color: {TEXT_SECONDARY};
-    padding: 9px 20px;
-    margin-right: 4px;
+    padding: 7px 11px;
+    margin-right: 2px;
     font-weight: 600;
+    font-size: 9.5pt;
     border: 1px solid transparent;
     border-top-left-radius: 8px;
     border-top-right-radius: 8px;
@@ -786,31 +990,65 @@ QTabBar::tab {{
 
 QTabBar::tab:selected {{
     background-color: {BG_SURFACE};
-    color: #FFFFFF;
+    color: {TEXT_PRIMARY};
     border: 1px solid {BORDER};
-    border-bottom: 1px solid {BG_SURFACE};
+    border-bottom: 2px solid {ACCENT};
 }}
 
 QTabBar::tab:hover:!selected {{
-    color: #FFFFFF;
-    background-color: rgba(255, 255, 255, 0.04);
+    color: {TEXT_PRIMARY};
+    background-color: {BG_CARD_HOVER};
+}}
+
+/* Разделители QSplitter (История, Проекты) */
+QSplitter {{
+    background: transparent;
+}}
+
+QSplitter::handle {{
+    background-color: {SPLITTER_HANDLE};
+    border-radius: 2px;
+}}
+
+QSplitter::handle:hover {{
+    background-color: {ACCENT};
+}}
+
+QSplitter::handle:pressed {{
+    background-color: {ACCENT_HOVER};
+}}
+
+QSplitter::handle:horizontal {{
+    width: 5px;
+    margin: 2px 0;
+}}
+
+QSplitter::handle:vertical {{
+    height: 5px;
+    margin: 0 2px;
 }}
 
 /* Карточки-контейнеры для группировки настроек */
-QFrame#SettingsCard {{
+QFrame#SectionBox, QFrame#SettingsCard {{
     background-color: {BG_CARD};
     border: 1px solid {BORDER};
     border-radius: 12px;
 }}
 
-QFrame#SettingsCard:hover {{
+QFrame#SectionBox:hover, QFrame#SettingsCard:hover {{
     border-color: {BORDER_LIGHT};
+}}
+
+QFrame#ConnectionBox {{
+    background-color: {BG_SURFACE_ALT};
+    border: 1px solid {BORDER};
+    border-radius: 8px;
 }}
 
 QLabel#CardTitle {{
     font-size: 11pt;
     font-weight: 700;
-    color: #FFFFFF;
+    color: {TEXT_PRIMARY};
 }}
 
 QLabel#CardSubtitle {{
@@ -821,11 +1059,11 @@ QLabel#CardSubtitle {{
 QLabel#FieldLabel {{
     font-size: 9.5pt;
     font-weight: 600;
-    color: #DDE2EC;
+    color: {TEXT_PRIMARY};
 }}
 
 /* Поля ввода (выделенные контрастные боксы) */
-QLineEdit, QTextEdit, QSpinBox {{
+QLineEdit, QTextEdit, QPlainTextEdit, QSpinBox {{
     background-color: {BG_SURFACE_ALT};
     color: {TEXT_PRIMARY};
     border: 1px solid {BORDER_INPUT};
@@ -835,20 +1073,29 @@ QLineEdit, QTextEdit, QSpinBox {{
     selection-color: #FFFFFF;
 }}
 
-QLineEdit:hover, QTextEdit:hover, QSpinBox:hover {{
-    border-color: #3F475A;
+QSpinBox {{
+    qproperty-alignment: 'AlignCenter';
 }}
 
-QLineEdit:focus, QTextEdit:focus, QSpinBox:focus {{
+QLineEdit:hover, QTextEdit:hover, QPlainTextEdit:hover, QSpinBox:hover {{
+    border-color: {ACCENT};
+}}
+
+QLineEdit:focus, QTextEdit:focus, QPlainTextEdit:focus, QSpinBox:focus {{
     border: 1.5px solid {ACCENT};
-    background-color: #151820;
-    color: #FFFFFF;
+    background-color: {BG_SURFACE};
+    color: {TEXT_PRIMARY};
 }}
 
-QLineEdit:disabled, QSpinBox:disabled {{
-    background-color: #16181E;
+QLineEdit:disabled, QTextEdit:disabled, QPlainTextEdit:disabled, QSpinBox:disabled {{
+    background-color: {INPUT_DISABLED_BG};
     color: {TEXT_MUTED};
-    border-color: #232731;
+    border-color: {INPUT_DISABLED_BORDER};
+}}
+
+QPlainTextEdit:read-only, QTextEdit:read-only {{
+    background-color: {BG_SURFACE_ALT};
+    color: {TEXT_PRIMARY};
 }}
 
 /* Группы параметров */
@@ -913,9 +1160,9 @@ QLabel#ValueLabel {{
 
 /* Значок «[?]» с подробной подсказкой */
 QLabel#HintLabel {{
-    background-color: #232734;
+    background-color: {BG_SURFACE_ALT};
     color: {ACCENT};
-    border: 1px solid #353C4D;
+    border: 1px solid {BORDER};
     border-radius: 6px;
     padding: 1px 7px;
     font-weight: 700;
@@ -923,7 +1170,7 @@ QLabel#HintLabel {{
 }}
 
 QLabel#HintLabel:hover {{
-    background-color: #31374A;
+    background-color: {ACCENT};
     color: #FFFFFF;
     border-color: {ACCENT};
 }}
@@ -983,7 +1230,7 @@ QCheckBox::indicator {{
 
 QCheckBox::indicator:hover {{
     border-color: {ACCENT};
-    background-color: #171A22;
+    background-color: {BG_CARD_HOVER};
 }}
 
 QCheckBox::indicator:checked {{
@@ -1017,8 +1264,8 @@ QListWidget::item:selected {{
 }}
 
 QListWidget::item:hover:!selected {{
-    background-color: #1A1E28;
-    color: #FFFFFF;
+    background-color: {BG_CARD_HOVER};
+    color: {TEXT_PRIMARY};
 }}
 
 /* Шпаргалка по промптам */
@@ -1050,43 +1297,533 @@ QStatusBar {{
     color: {TEXT_SECONDARY};
     border-top: 1px solid {BORDER};
 }}
+
+/* ============================================================ */
+/* Раздел «История» (ЭТАП 7)                                    */
+/* ============================================================ */
+QTableWidget#HistoryTable {{
+    background-color: {TABLE_BG};
+    border: 1px solid {BORDER};
+    border-radius: 8px;
+    gridline-color: {BORDER};
+    selection-background-color: {ACCENT};
+    selection-color: #FFFFFF;
+    color: {TEXT_PRIMARY};
+    font-size: 9pt;
+}}
+QTableWidget#HistoryTable::item {{
+    padding: 6px 8px;
+    border-bottom: 1px solid {BORDER};
+}}
+QTableWidget#HistoryTable::item:selected {{
+    background-color: {ACCENT};
+    color: #FFFFFF;
+}}
+QHeaderView::section {{
+    background-color: {TABLE_HEADER_BG};
+    color: {TEXT_MUTED};
+    padding: 6px 8px;
+    border: none;
+    border-bottom: 1px solid {BORDER};
+    border-right: 1px solid {BORDER};
+    font-weight: 600;
+    font-size: 8.5pt;
+}}
+
+QPushButton#HistoryBrowserBtn {{
+    background-color: {BTN_BG};
+    color: {TEXT_PRIMARY};
+    border: 1px solid {BORDER};
+    border-radius: 7px;
+    padding: 4px 11px;
+    min-height: 28px;
+    font-size: 9pt;
+    font-weight: 600;
+}}
+QPushButton#HistoryBrowserBtn:hover {{
+    background-color: {BTN_HOVER_BG};
+    border-color: {ACCENT};
+    color: {BTN_HOVER_TEXT};
+}}
+
+QPushButton#StarBtn {{
+    background-color: transparent;
+    color: #475569;
+    border: none;
+    font-size: 13pt;
+    padding: 0px;
+}}
+QPushButton#StarBtn:hover {{
+    color: #FBBF24;
+}}
+
+QPushButton#StarBtnActive {{
+    background-color: transparent;
+    color: #F59E0B;
+    border: none;
+    font-size: 13pt;
+    padding: 0px;
+}}
+QPushButton#StarBtnActive:hover {{
+    color: #FCD34D;
+}}
+
+QFrame#HistoryDetailPanel {{
+    background-color: {BG_CARD};
+    border: 1px solid {BORDER};
+    border-radius: 10px;
+    padding: 8px;
+}}
+
+QLabel#HistoryDetailTitle {{
+    color: {TEXT_PRIMARY};
+    font-weight: 700;
+    font-size: 10pt;
+}}
+
+QLabel#HistoryBadge {{
+    background-color: {BG_SURFACE_ALT};
+    color: {ACCENT};
+    border: 1px solid {BORDER};
+    border-radius: 5px;
+    padding: 2px 7px;
+    font-size: 8.5pt;
+    font-weight: 600;
+}}
+
+QPlainTextEdit#HistoryDetailEdit, QTextEdit#HistoryDetailEdit {{
+    background-color: {BG_SURFACE_ALT};
+    color: {TEXT_PRIMARY};
+    border: 1px solid {BORDER_INPUT};
+    border-radius: 8px;
+    padding: 10px 12px;
+    font-size: 9.5pt;
+    selection-background-color: {ACCENT};
+    selection-color: #FFFFFF;
+}}
+
+QPlainTextEdit#HistoryDetailEdit:hover, QTextEdit#HistoryDetailEdit:hover {{
+    border-color: {ACCENT};
+}}
+
+QPlainTextEdit#HistoryDetailEdit:focus, QTextEdit#HistoryDetailEdit:focus {{
+    background-color: {BG_SURFACE};
+    border: 1.5px solid {ACCENT};
+    color: {TEXT_PRIMARY};
+}}
+
+QPlainTextEdit#HistoryDetailEdit:read-only, QTextEdit#HistoryDetailEdit:read-only {{
+    background-color: {BG_SURFACE_ALT};
+    color: {TEXT_PRIMARY};
+}}
+
+/* =========================================================================
+   ЭТАП 8: Проекты, Контекст и Глоссарий
+   ========================================================================= */
+
+/* Панель проекта в мини-окне */
+QFrame#ProjectBar {{
+    background-color: {PROJECT_BAR_BG};
+    border-bottom: 1px solid {BORDER};
+    padding: 2px 0px;
+}}
+
+QComboBox#ProjectSelector {{
+    background-color: {BG_SURFACE_ALT};
+    color: {TEXT_PRIMARY};
+    border: 1px solid {BORDER_INPUT};
+    border-radius: 6px;
+    padding: 4px 8px;
+    font-size: 8.5pt;
+    font-weight: 600;
+}}
+QComboBox#ProjectSelector:hover {{
+    border-color: {ACCENT};
+}}
+
+QPushButton#ProjectBarBtn {{
+    background-color: {BTN_BG};
+    color: {TEXT_SECONDARY};
+    border: 1px solid {BORDER};
+    border-radius: 6px;
+    padding: 4px 8px;
+    font-size: 8pt;
+    font-weight: 500;
+}}
+QPushButton#ProjectBarBtn:hover {{
+    background-color: {BTN_HOVER_BG};
+    color: {TEXT_PRIMARY};
+    border-color: {ACCENT};
+}}
+
+/* Бейджи приватности */
+QLabel#PrivacyBadgeLocal {{
+    background-color: rgba(34, 197, 94, 0.12);
+    color: #4ADE80;
+    border: 1px solid rgba(34, 197, 94, 0.3);
+    border-radius: 6px;
+    padding: 3px 8px;
+    font-size: 8pt;
+    font-weight: 600;
+}}
+
+QLabel#PrivacyBadgeCloud {{
+    background-color: rgba(245, 158, 11, 0.12);
+    color: #FBBF24;
+    border: 1px solid rgba(245, 158, 11, 0.35);
+    border-radius: 6px;
+    padding: 3px 8px;
+    font-size: 8pt;
+    font-weight: 600;
+}}
+
+/* Подпанель ввода разового контекста (Ad-Hoc) */
+QFrame#AdHocBar {{
+    background-color: {PROJECT_BAR_BG};
+    border-bottom: 1px solid {BORDER};
+}}
+QLineEdit#AdHocEdit {{
+    background-color: {BG_SURFACE_ALT};
+    color: {TEXT_PRIMARY};
+    border: 1px solid {BORDER_INPUT};
+    border-radius: 6px;
+    padding: 5px 8px;
+    font-size: 8.5pt;
+}}
+
+/* Бейдж проекта на карточке перевода */
+QLabel#CardProjectBadge {{
+    background-color: {BG_SURFACE_ALT};
+    color: {ACCENT};
+    border: 1px solid {BORDER};
+    border-radius: 5px;
+    padding: 2px 7px;
+    font-size: 8pt;
+    font-weight: 600;
+}}
+
+/* Список проектов в окне настроек */
+QListWidget#ProjectsList {{
+    background-color: {BG_SURFACE_ALT};
+    border: 1px solid {BORDER_INPUT};
+    border-radius: 8px;
+    color: {TEXT_PRIMARY};
+    outline: none;
+    padding: 4px;
+}}
+QListWidget#ProjectsList::item {{
+    padding: 10px 12px;
+    border-radius: 6px;
+    margin-bottom: 3px;
+}}
+QListWidget#ProjectsList::item:hover {{
+    background-color: {BG_CARD_HOVER};
+}}
+QListWidget#ProjectsList::item:selected {{
+    background-color: {ACCENT};
+    color: #FFFFFF;
+    border-left: 3px solid {ACCENT_HOVER};
+}}
+
+/* Таблица глоссария */
+QTableWidget#GlossaryTable {{
+    background-color: {BG_SURFACE_ALT};
+    border: 1px solid {BORDER_INPUT};
+    border-radius: 8px;
+    gridline-color: {BORDER};
+    color: {TEXT_PRIMARY};
+    selection-background-color: {ACCENT};
+    selection-color: #FFFFFF;
+}}
+QTableWidget#GlossaryTable::item {{
+    padding: 6px 8px;
+}}
+
+/* Карточка предупреждения о приватности */
+QFrame#PrivacyWarningCard {{
+    background-color: rgba(245, 158, 11, 0.08);
+    border: 1px solid rgba(245, 158, 11, 0.25);
+    border-radius: 8px;
+    padding: 10px 14px;
+}}
+QLabel#PrivacyWarningText {{
+    color: {WARNING};
+    font-size: 8.5pt;
+    line-height: 1.4;
+}}
+QFrame#PrivacyLocalCard {{
+    background-color: rgba(34, 197, 94, 0.08);
+    border: 1px solid rgba(34, 197, 94, 0.25);
+    border-radius: 8px;
+    padding: 10px 14px;
+}}
+QLabel#PrivacyLocalText {{
+    color: {SUCCESS};
+    font-size: 8.5pt;
+    line-height: 1.4;
+}}
+
+
+/* ============================================================ */
+/* ЭТАП 9: Статусы операций и Мастер первого запуска            */
+/* ============================================================ */
+
+/* Бейджи статусов карточки (Этап 9.3) */
+QLabel#CardStatusBadge {{
+    padding: 3px 9px;
+    border-radius: 5px;
+    font-size: 8.5pt;
+    font-weight: 600;
+}}
+
+QLabel#CardStatusIdle {{
+    background-color: {STATUS_IDLE_BG};
+    color: {STATUS_IDLE_TEXT};
+    border: 1px solid {BORDER};
+}}
+
+QLabel#CardStatusCapturing {{
+    background-color: {STATUS_PROGRESS_BG};
+    color: {STATUS_PROGRESS_TEXT};
+    border: 1px solid {ACCENT};
+}}
+
+QLabel#CardStatusSending {{
+    background-color: {STATUS_PROGRESS_BG};
+    color: {STATUS_PROGRESS_TEXT};
+    border: 1px solid {ACCENT};
+}}
+
+QLabel#CardStatusGenerating {{
+    background-color: {STATUS_PROGRESS_BG};
+    color: {STATUS_PROGRESS_TEXT};
+    border: 1px solid {ACCENT};
+}}
+
+QLabel#CardStatusReady {{
+    background-color: {STATUS_DONE_BG};
+    color: {STATUS_DONE_TEXT};
+    border: 1px solid {SUCCESS};
+}}
+
+QLabel#CardStatusError {{
+    background-color: {STATUS_ERROR_BG};
+    color: {STATUS_ERROR_TEXT};
+    border: 1px solid {DANGER};
+}}
+
+QLabel#CardStatusCancelled {{
+    background-color: {STATUS_CANCEL_BG};
+    color: {STATUS_CANCEL_TEXT};
+    border: 1px solid {BORDER};
+}}
+
+/* Кнопка отмены запроса */
+QPushButton#CardCancelBtn {{
+    background-color: {STATUS_ERROR_BG};
+    color: {DANGER};
+    border: 1px solid {DANGER};
+    border-radius: 6px;
+    padding: 3px 10px;
+    font-size: 8.5pt;
+    font-weight: 600;
+}}
+
+QPushButton#CardCancelBtn:hover {{
+    background-color: {DANGER};
+    color: #FFFFFF;
+}}
+
+/* Кнопка подробностей ошибки */
+QPushButton#CardDetailsBtn {{
+    background-color: transparent;
+    color: {TEXT_MUTED};
+    border: none;
+    font-size: 8pt;
+    text-decoration: underline;
+    padding: 2px 4px;
+}}
+
+QPushButton#CardDetailsBtn:hover {{
+    color: {TEXT_PRIMARY};
+}}
+
+/* Диагностическая панель подробностей ошибки (Этап 9.6) */
+QFrame#CardTechnicalDetails {{
+    background-color: {BG_SURFACE_ALT};
+    border: 1px solid {BORDER};
+    border-radius: 8px;
+    padding: 8px 12px;
+    margin-top: 4px;
+}}
+
+QLabel#CardTechnicalDetailsText {{
+    color: {TEXT_SECONDARY};
+    font-family: "Consolas", "Courier New", monospace;
+    font-size: 8.5pt;
+}}
+
+/* Кнопка переключения поверх всех окон */
+QPushButton#PinTopBtn {{
+    background-color: {BTN_BG};
+    color: {TEXT_SECONDARY};
+    border: 1px solid {BORDER};
+    border-radius: 7px;
+    padding: 4px 11px;
+    min-height: 28px;
+    font-size: 9pt;
+    font-weight: 600;
+}}
+
+QPushButton#PinTopBtn:hover {{
+    background-color: {BG_CARD_HOVER};
+    color: {TEXT_PRIMARY};
+}}
+
+QPushButton#PinTopBtn:checked {{
+    background-color: {ACCENT};
+    color: #FFFFFF;
+    border-color: {ACCENT};
+}}
+
+/* Разделение оригинала и результата (Этап 9.2) */
+QFrame#SourceContainer {{
+    background-color: {SOURCE_BG};
+    border: 1px solid {BORDER};
+    border-radius: 8px;
+    padding: 6px 10px;
+    margin-bottom: 4px;
+}}
+
+QLabel#SourceHeaderLabel {{
+    color: {TEXT_MUTED};
+    font-size: 8pt;
+    font-weight: 700;
+    text-transform: uppercase;
+}}
+
+QLabel#CardSourceLabel {{
+    color: {SOURCE_TEXT};
+    font-size: 9pt;
+    line-height: 1.4;
+}}
+
+QLabel#CardResultLabel {{
+    color: {RESULT_TEXT};
+    font-size: 10.5pt;
+    font-weight: 500;
+    line-height: 1.45;
+    padding: 4px 0px;
+}}
+
+/* Мастер первоначальной настройки (Этап 9.4) */
+QDialog#FirstRunWizard {{
+    background-color: {BG_WINDOW};
+}}
+
+QFrame#WizardStepCard {{
+    background-color: {BG_CARD};
+    border: 1px solid {BORDER};
+    border-radius: 12px;
+    padding: 20px;
+}}
+
+QLabel#WizardTitle {{
+    color: {TEXT_PRIMARY};
+    font-size: 15pt;
+    font-weight: 700;
+}}
+
+QLabel#WizardSubtitle {{
+    color: {TEXT_SECONDARY};
+    font-size: 9.5pt;
+    line-height: 1.4;
+}}
+
+QLabel#WizardStepIndicator {{
+    color: {ACCENT};
+    font-size: 9pt;
+    font-weight: 700;
+}}
+
+QFrame#WizardChoiceBox {{
+    background-color: {BG_SURFACE_ALT};
+    border: 1.5px solid {BORDER};
+    border-radius: 10px;
+    padding: 12px;
+}}
+
+QFrame#WizardChoiceBox:hover {{
+    border-color: {ACCENT};
+    background-color: {BG_CARD_HOVER};
+}}
+
+QFrame#WizardChoiceBoxSelected {{
+    background-color: {BG_SURFACE_ALT};
+    border: 2px solid {ACCENT};
+    border-radius: 10px;
+    padding: 12px;
+}}
 """
 
 
-def repolish(widget) -> None:
-    """Применяет QSS заново после смены objectName у виджета.
+def get_application_stylesheet(theme: str = "dark", font_size: str = "medium") -> str:
+    """Генерирует полную таблицу стилей QSS для выбранной темы и размера шрифта."""
+    palette = get_theme_palette(theme)
+    # Форматируем плейсхолдеры палитры
+    qss = _QSS_RAW_TEMPLATE.format(**palette)
+    # Масштабируем шрифты
+    return scale_font_sizes(qss, font_size)
 
-    QSS-селекторы по objectName вычисляются при появлении виджета; если
-    objectName меняется на лету (кнопка «Скопировать» → «Скопировано ✓»,
-    «ИИ» → «Обычный»), нужно «переполировать» виджет.
-    """
+
+# Дефолтный стиль (тёмный, средний шрифт) для обратной совместимости
+APP_QSS = get_application_stylesheet("dark", "medium")
+
+
+def apply_theme(app: Optional[QApplication] = None, theme: str = "dark", font_size: str = "medium") -> str:
+    """Применяет тему и размер шрифта ко всему приложению.
+    Возвращает фактически применённую тему ('dark' или 'light')."""
+    palette = get_theme_palette(theme)
+    actual_theme = "light" if palette == LIGHT_PALETTE else "dark"
+    qss = get_application_stylesheet(actual_theme, font_size)
+    target = app or QApplication.instance()
+    if target is not None:
+        try:
+            target.setStyleSheet(qss)
+        except Exception:
+            pass
+    return actual_theme
+
+
+def repolish(widget: QWidget) -> None:
+    """Применяет QSS заново после смены objectName или состояния у виджета."""
     style = widget.style()
-    style.unpolish(widget)
-    style.polish(widget)
+    if style:
+        style.unpolish(widget)
+        style.polish(widget)
 
 
-def apply_dark_title_bar(window: QWidget) -> None:
-    """Тёмный заголовок окна на Windows 10 (сборка 19041+) / Windows 11.
-
-    Вызывается из showEvent() окон после их показа. Косметика: если вызов
-    не сработал (не Windows, старая сборка ОС) — молча остаётся светлый
-    заголовок, приложение не падает.
-    """
+def apply_title_bar_theme(window: QWidget, dark: bool = True) -> None:
+    """Переключает тему заголовка окна (Windows 10 сборка 19041+ / Windows 11)."""
     if sys.platform != "win32":
         return
     try:
         import ctypes
-
         hwnd = int(window.winId())
-        value = ctypes.c_int(1)  # TRUE → тёмная тема заголовка
+        val = 1 if dark else 0
+        value = ctypes.c_int(val)
         dwm = ctypes.windll.dwmapi
         result = dwm.DwmSetWindowAttribute(
             hwnd, 20, ctypes.byref(value), ctypes.sizeof(value)  # 20 = DWMWA_USE_IMMERSIVE_DARK_MODE
         )
         if result != 0:
-            # На старых сборках Windows 10 тот же атрибут имеет номер 19.
             dwm.DwmSetWindowAttribute(
                 hwnd, 19, ctypes.byref(value), ctypes.sizeof(value)
             )
-    except Exception:  # noqa: BLE001 — это чистая косметика, не критично
+    except Exception:
         pass
+
+
+def apply_dark_title_bar(window: QWidget) -> None:
+    """Тёмный заголовок окна (обратная совместимость)."""
+    apply_title_bar_theme(window, dark=True)
